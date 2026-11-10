@@ -27,7 +27,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 AGENTS = ("claude", "codex")
 SENDERS = AGENTS + ("user", "system")
 KINDS = ("msg", "task", "draft", "review", "proposal", "agree", "disagree", "decision", "note")
@@ -35,6 +35,7 @@ MODES = ("chat", "review", "propose", "independent")
 MAX_BODY = 200000
 CONTEXT_CHARS = 60000
 MAX_WAIT = 1800
+MAX_VERSIONS = 6  # 同一个结论最多修订到第几版；到了还谈不拢就把分歧交给用户
 OWN_ENV = {"codex": ("CODEX_", "OPENAI_"), "claude": ("CLAUDE_", "ANTHROPIC_")}
 SECRETISH = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL", re.I)
 RO_EXEC = Path(__file__).resolve().with_name("ro_exec.py")
@@ -54,8 +55,12 @@ MODE_TEXT = {
         "区分“有问题”和“我没法核实”。没有问题就直说，不要为了显得有用而凑问题。"
     ),
     "propose": (
-        "对方提出了一条 proposal。判断你是否同意这个具体版本。同意就写 VERDICT: agree #N；"
-        "不同意就写 VERDICT: disagree #N，并列出你要求修改的具体条目。“有道理”不等于同意。"
+        "对方提出了一条 proposal。判断你是否同意这个具体版本。同意就写 VERDICT: agree #N。"
+        "不同意就写 VERDICT: disagree #N，并且一次把所有意见提完：逐条列出要改的地方、依据，"
+        "以及你能同意的确切文字。没有列出的部分视为你已同意；下一版如果只按你列的条目修改，你应当同意，"
+        "不要再提上一轮本可以提出的新意见。“有道理”不等于同意。"
+        "如果某一点双方已经各自陈述过两次仍然谈不拢，明确写“这一点无法达成一致”并写清你的立场和依据，"
+        "对方会把它原样报告给用户。"
     ),
     "independent": (
         "这是独立作答。对方已经先写完自己的版本并封存（消息里记了它的 SHA-256），你看不到它。"
@@ -128,6 +133,21 @@ def all_msgs(room):
     return [get(room, n) for n in seqs(room)]
 
 
+def chain_version(room, seq):
+    """这条 proposal 是它那条修订链里的第几版：沿 reply_to 往回数连续的 proposal。"""
+    m, n, seen = get(room, seq), 1, {seq}
+    while m.get("reply_to") is not None:
+        try:
+            m = get(room, m["reply_to"])
+        except RoomError:
+            break
+        if m["kind"] != "proposal" or m["seq"] in seen:
+            break
+        seen.add(m["seq"])
+        n += 1
+    return n
+
+
 def append(room, sender, body, kind="msg", to=None, reply_to=None, refs=(), meta=None):
     """追加一条消息。序号通过硬链接原子分配，多个进程同时写也不会重号或互相覆盖。"""
     if sender not in SENDERS:
@@ -148,6 +168,13 @@ def append(room, sender, body, kind="msg", to=None, reply_to=None, refs=(), meta
             if target["from"] == sender:
                 raise RoomError("不能对自己的 proposal 表态")
             meta["target_sha256"] = target["sha256"]
+        elif kind == "proposal" and target["kind"] == "proposal":
+            version = chain_version(room, reply_to)
+            if version >= MAX_VERSIONS:
+                raise RoomError(
+                    "这个结论已经修订到第 %d 版（上限 %d），消息没有发出。\n"
+                    "不要再发新版本：运行 outcome 取得分歧清单，把双方的立场和依据原样告诉用户，由用户决定。"
+                    % (version, MAX_VERSIONS))
     elif kind in ("agree", "disagree"):
         raise RoomError("%s 必须用 --reply-to 指向一条 proposal" % kind)
     msg = {
@@ -706,6 +733,20 @@ def cmd_ask(args):
     set_cursor(room, host, max(seqs(room)))
     if warn:
         print("\n注意：" + warn, file=sys.stderr)
+    if r_kind in ("agree", "disagree"):
+        state = {p["seq"]: p["state"] for p in proposals(room)}.get(r_reply_to)
+        version = chain_version(room, r_reply_to)
+        if state == "agreed":
+            print("\n一致性：#%d 已达成一致（第 %d 版）。" % (r_reply_to, version), file=sys.stderr)
+        elif r_kind == "disagree":
+            if version >= MAX_VERSIONS:
+                nxt = ("已经是第 %d 版，到了上限：不要再发新版本，运行 outcome 取得分歧清单，原样告诉用户。" % version)
+            else:
+                nxt = ("逐条核对它的意见。接受的：改好后用 --mode propose --reply-to %d 发新版本让它确认，"
+                       "你自己改完不等于它同意。不接受的：写明依据再发。同一点各说过两次仍谈不拢就停，"
+                       "运行 outcome 取得分歧清单，原样告诉用户。" % r_reply_to)
+            print("\n一致性：未达成一致，%s 不同意 #%d（第 %d 版）。%s" % (peer, r_reply_to, version, nxt),
+                  file=sys.stderr)
     return 0
 
 
@@ -730,10 +771,57 @@ def proposals(room):
             state = "agreed"
         else:
             state = "pending"
-        out.append({"seq": p["seq"], "from": p["from"], "state": state,
+        out.append({"seq": p["seq"], "from": p["from"], "state": state, "version": chain_version(room, p["seq"]),
                     "verdicts": {a: {"kind": v["kind"], "seq": v["seq"]} for a, v in latest.items()},
                     "waiting": [a for a in need if a not in latest]})
     return out
+
+
+def outcome(room):
+    """整场讨论的结果：agreed（所有未被取代的 proposal 都已获明确同意）、open（还有没同意的）、none（没有 proposal）。"""
+    live = [p for p in proposals(room) if p["state"] != "superseded"]
+    if not live:
+        return "none", live
+    return ("agreed" if all(p["state"] == "agreed" for p in live) else "open"), live
+
+
+def cmd_outcome(args):
+    room = room_path(args)
+    load_room(room)
+    state, live = outcome(room)
+    objections = []
+    for p in live:
+        if p["state"] == "agreed":
+            continue
+        for a, v in p["verdicts"].items():
+            if v["kind"] == "disagree":
+                objections.append({"proposal": p["seq"], "from": a, "seq": v["seq"], "body": get(room, v["seq"])["body"]})
+    if args.json:
+        print(json.dumps({"state": state, "proposals": live, "objections": objections}, ensure_ascii=False, indent=1))
+    elif state == "none":
+        print("一致性：没有可表态的结论（聊天室里没有 proposal）。")
+        print("要对用户说“双方一致”，先用 ask --mode propose 把结论交给对方表态；否则汇报时写明“对方没有对结论表态”。")
+    elif state == "agreed":
+        print("一致性：已达成一致")
+        for p in live:
+            who = "，".join("%s 在 #%d 同意" % (a, v["seq"]) for a, v in p["verdicts"].items())
+            print("proposal #%d（%s 提出，第 %d 版）：%s" % (p["seq"], p["from"], p["version"], who))
+    else:
+        print("一致性：未达成一致")
+        for p in live:
+            if p["state"] == "agreed":
+                who = "，".join("%s 在 #%d 同意" % (a, v["seq"]) for a, v in p["verdicts"].items())
+                print("proposal #%d（%s 提出，第 %d 版）：已达成一致；%s" % (p["seq"], p["from"], p["version"], who))
+            elif p["state"] == "disputed":
+                print("proposal #%d（%s 提出，第 %d 版）：有分歧" % (p["seq"], p["from"], p["version"]))
+            else:
+                print("proposal #%d（%s 提出，第 %d 版）：待表态，等 %s"
+                      % (p["seq"], p["from"], p["version"], "、".join(p["waiting"])))
+        for o in objections:
+            print("\n—— %s 在 #%d 对 #%d 的不同意理由（原文）——\n%s" % (o["from"], o["seq"], o["proposal"], o["body"]))
+        print("\n向用户汇报时，第一句必须是“未达成一致”，并逐条列出上面的分歧：分歧点、双方各自的立场和依据、"
+              "缺什么信息能定。你已经按对方意见改好但对方还没确认的版本，也算未达成一致。")
+    return {"agreed": 0, "open": 1, "none": 3}[state]
 
 
 def cmd_status(args):
@@ -744,7 +832,7 @@ def cmd_status(args):
     if args.json:
         print(json.dumps({"room": str(room), "topic": meta.get("topic"), "rules": meta.get("rules"),
                           "messages": len(ms), "unread": {w: len(unread(room, w)) for w in AGENTS + ("user",)},
-                          "proposals": props}, ensure_ascii=False, indent=1))
+                          "outcome": outcome(room)[0], "proposals": props}, ensure_ascii=False, indent=1))
         return 0
     print("聊天室：%s" % room)
     print("主题：%s" % (meta.get("topic") or "（未设置）"))
@@ -754,13 +842,16 @@ def cmd_status(args):
     else:
         print("消息：0 条")
     print("未读：" + " · ".join("%s %d" % (w, len(unread(room, w))) for w in AGENTS + ("user",)))
+    print("一致性：" + {"agreed": "已达成一致", "open": "未达成一致（运行 outcome 看分歧）",
+                      "none": "没有可表态的结论"}[outcome(room)[0]])
     label = {"agreed": "已达成一致", "disputed": "有分歧", "pending": "待表态", "superseded": "已被新版本取代"}
     for p in props:
         detail = "，".join("%s 在 #%d %s" % (a, v["seq"], "同意" if v["kind"] == "agree" else "不同意")
                            for a, v in p["verdicts"].items())
         if p["waiting"] and p["state"] == "pending":
             detail = (detail + "，" if detail else "") + "等 " + "、".join(p["waiting"])
-        print("proposal #%d（%s 提出）：%s%s" % (p["seq"], p["from"], label[p["state"]], "；" + detail if detail else ""))
+        print("proposal #%d（%s 提出，第 %d 版）：%s%s"
+              % (p["seq"], p["from"], p["version"], label[p["state"]], "；" + detail if detail else ""))
     logs = sorted((room / "calls").glob("*.json"))
     if logs:
         c = read_json(logs[-1]) or {}
@@ -912,6 +1003,11 @@ def main(argv=None):
     s = sub.add_parser("status", help="概况：未读、proposal 状态、最近一次调用")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("outcome", help="汇报前必跑：双方是否对最终版本达成一致；没有就列出分歧原文"
+                                       "（退出码 0 一致，1 未一致，3 没有 proposal）")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_outcome)
 
     s = sub.add_parser("log", help="导出 Markdown 记录给人看")
     s.add_argument("--last", type=int, metavar="N")

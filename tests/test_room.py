@@ -232,6 +232,60 @@ class RoomTest(unittest.TestCase):
         self.assertIn("仍然待表态", r.stderr)
         self.assertEqual(json.loads(self.ok("status", "--json"))["proposals"][1]["state"], "pending")
 
+    def test_outcome_requires_explicit_agreement_on_the_final_version(self):
+        r = self.run_room("outcome")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("没有可表态的结论", r.stdout)
+        r = self.run_room("ask", "--as", "claude", "--peer", "codex", "--mode", "propose", "结论一", role="claude",
+                          FAKE_REPLY="第 2 条的数字不对，应为 512。\nVERDICT: disagree #1")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("未达成一致", r.stderr)
+        self.assertIn("--reply-to 1", r.stderr)
+        r = self.run_room("outcome")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("一致性：未达成一致", r.stdout)
+        self.assertIn("第 2 条的数字不对，应为 512。", r.stdout)  # 对方的原话，不是主持人的转述
+        # 主持人自己改好并记一条 decision，不算对方同意
+        self.ok("post", "--as", "claude", "--kind", "decision", "按对方意见改成 512", role="claude")
+        self.assertEqual(self.run_room("outcome").returncode, 1)
+        self.assertIn("未达成一致", self.ok("status"))
+        # 改好的版本发回去，对方明确同意，才算一致
+        r = self.run_room("ask", "--as", "claude", "--peer", "codex", "--mode", "propose", "--reply-to", "1",
+                          "结论一，数字改为 512", role="claude", FAKE_REPLY="可以。\nVERDICT: agree #4")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("#4 已达成一致（第 2 版）", r.stderr)
+        r = self.run_room("outcome")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("一致性：已达成一致", r.stdout)
+        out = json.loads(self.ok("outcome", "--json"))
+        self.assertEqual((out["state"], out["proposals"][0]["version"], out["objections"]), ("agreed", 2, []))
+        # 另一条还没表态的结论会让整体回到未一致
+        self.ok("post", "--as", "claude", "--kind", "proposal", "结论二", role="claude")
+        r = self.run_room("outcome")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("待表态，等 codex", r.stdout)
+        self.assertEqual(json.loads(self.ok("status", "--json"))["outcome"], "open")
+
+    def test_proposal_revisions_are_capped(self):
+        self.ok("post", "--as", "claude", "--kind", "proposal", "第 1 版")
+        for n in range(1, 6):
+            self.ok("post", "--as", "claude", "--kind", "proposal", "--reply-to", str(n), "第 %d 版" % (n + 1))
+        st = json.loads(self.ok("status", "--json"))["proposals"]
+        self.assertEqual([p["version"] for p in st], [1, 2, 3, 4, 5, 6])
+        r = self.run_room("post", "--as", "claude", "--kind", "proposal", "--reply-to", "6", "第 7 版")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("上限 6", r.stderr)
+        r = self.run_room("ask", "--as", "claude", "--peer", "codex", "--mode", "propose", "--reply-to", "6",
+                          "第 7 版", role="claude")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(len(self.msgs()), 6)  # 被拒绝的消息没有发出，也没有调用对方
+        self.assertFalse(self.log.exists() and self.log.read_text(encoding="utf-8").strip())
+
+    def test_propose_prompt_asks_for_all_objections_at_once(self):
+        out = self.ok("ask", "--as", "claude", "--peer", "codex", "--mode", "propose", "--dry-run", "结论", role="claude")
+        self.assertIn("一次把所有意见提完", out)
+        self.assertIn("你能同意的确切文字", out)
+
     def test_ask_independent_seals_then_reveals(self):
         draft = self.dir / "mine.md"
         draft.write_text("我的独立答案：选方案 B", encoding="utf-8")

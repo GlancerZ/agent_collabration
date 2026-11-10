@@ -16,7 +16,7 @@
 
 - **评审**：一方只读检查另一方的方案、结果或代码，意见要带证据。
 - **独立作答后比较**：一方先封存自己的答案，另一方看不到它就作答，然后公开比较。
-- **讨论并确认结论**：结论作为 proposal 提出，另一方必须对这个具体版本明确同意或不同意。
+- **讨论并确认结论**：结论作为 proposal 提出，另一方必须对这个具体版本明确同意或不同意。不同意就修改后再发，直到对方同意；谈不拢时把分歧逐条告诉你。汇报的第一句是“已达成一致”还是“未达成一致”，由 `room.py outcome` 判定。
 - **默认只读，由系统强制**：优先用 Codex 自带沙箱；沙箱起不来的机器（例如关闭了 user namespace 的 HPC 登录节点）改用内核 Landlock。
 - **用户的规则自动传给对方**：写进聊天室的规则，每次调用都会带上。
 - **你随时能看、能插话**：终端里 `room.py tail` 实时查看，`room.py post --as user` 发言。
@@ -46,6 +46,7 @@ $ROOM init --topic "方案复核" --rule "不修改任何文件"
 $ROOM doctor                                   # 检查环境，不调用模型
 $ROOM ask --as user --peer codex --mode review --ref plan.md "请复核 plan.md。"
 $ROOM status
+$ROOM outcome                                  # 双方是否已达成一致；没有就列出分歧
 $ROOM log --out transcript.md
 ```
 
