@@ -1,0 +1,4 @@
+interface:
+  display_name: "本地双 Agent 聊天室"
+  short_description: "Claude Code 和 Codex CLI 通过本地文件聊天室互相评审、独立比较、讨论并确认结论，不需要 Slack 或常驻进程"
+  default_prompt: "使用 $local-agent-room 让 Claude 对我当前的方案做一次只读评审，把用户定的限制写进聊天室规则，然后告诉我双方的结论和分歧。"
