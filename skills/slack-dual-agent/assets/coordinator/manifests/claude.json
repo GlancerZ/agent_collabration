@@ -1,0 +1,24 @@
+{
+  "display_information": {
+    "name": "Claude",
+    "description": "Local dual-agent workspace"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Claude",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "channels:read"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

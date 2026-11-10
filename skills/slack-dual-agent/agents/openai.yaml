@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slack 双 Agent 工作室"
+  short_description: "搭建和维护由本机 Codex CLI 与 Claude Code 驱动的 Slack 双 agent 协作系统"
+  default_prompt: "使用 $slack-dual-agent 搭建或维护我的 Slack 双 agent 系统，保留两个本机 CLI 的独立账户、会话和成果。"

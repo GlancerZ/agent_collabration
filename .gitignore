@@ -1,0 +1,13 @@
+.DS_Store
+node_modules/
+.local/
+.env
+.env.*
+*.log
+*.sqlite*
+__pycache__/
+.venv/
+*.zip
+*.skill
+*transcript.json
+smoke*-report.json
