@@ -2,7 +2,7 @@
 
 本仓库提供本地双模型聊天室、Slack 协作工具和通用科研工作流。
 
-**[通用科研 agent](skills/spatial-research-agent/SKILL.md)** 使用 Claude 规划、Gemini 独立评审、Codex 核对项目或执行实验，适用于研究设计、证据综合、理论推导与计算实验。
+**[通用科研 agent](skills/spatial-research-agent/SKILL.md)** 由 Claude 和 Gemini 独立规划及验收，Codex 执行、自检并提出结果解读，最后由 Claude 汇总三方意见，适用于研究设计、证据综合、理论推导与计算实验。
 
 | | [local-agent-room](skills/local-agent-room/SKILL.md)（推荐） | [slack-dual-agent](skills/slack-dual-agent/SKILL.md) |
 | --- | --- | --- |
