@@ -5,6 +5,10 @@ description: 用 Claude、Gemini 和 Codex 协作设计、复核或执行空间�
 
 # 空间模型科研协作
 
+启动新任务时，先在当前对话一次列出三个角色、调用入口和建议型号，询问用户采用这组还是调整其中几项。Claude Code 和 Codex 可以选择沿用各自 CLI 配置；Gemini 可建议 gemini-4-neon-high。若要展示具体可选项，按当前客户端或账户核实，Antigravity 可运行 `agy models`。已有明确选择的角色直接沿用，用户已为本次任务指定全部型号或明确接受默认组合时直接开始。收到选择后才读取远程文件、调用模型。
+
+聊天中确认的选择通过 `--claude-model`（经 Antigravity 时用 `--claude-agy-model`）、`--gemini-model` 和 `--codex-model` 传给脚本。交互终端会依次询问尚未指定的角色；无人值守时显式给出型号，或在用户接受默认值后传 `--use-defaults`。例如 `--claude-model opus --gemini-model gemini-4-neon-high --codex-model gpt-6.2-astra`。运行目录的 `models.json` 记录调用入口与请求型号，其中 `default` 表示运行时由该 CLI 解析。
+
 把用户原始问题和三方可共享的背景写入 UTF-8 Markdown。尽量保留原话，补上可用数据、split、checkpoint、算力预算和用户要做的决定。比如「用两个已有 checkpoint 判断真实邻域是否提高未见患者上的细胞类型预测；只做评估，按 donor 配对，不重新训练」。给 Gemini 的输入只包含这份材料，以保留独立意见。
 
 需要 Python 3.8+，以及已登录且可在终端非交互运行的 claude、agy（Google Antigravity CLI）和 codex。个人 Google 账号请按 [Antigravity 官方指南](https://antigravity.google/docs/getting-started?tab=cli) 安装 agy，运行 agy 登录。命令在 PATH 中可见时，从仓库根目录运行：

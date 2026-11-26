@@ -1,5 +1,6 @@
 """Run a spatial foundation model study with Claude, Gemini and Codex."""
 import argparse
+import json
 import re
 import shlex
 import shutil
@@ -55,6 +56,30 @@ def collect_evidence(host, paths, socket, directory):
     return directory
 
 
+def select_models(args, parser):
+    roles = [
+        ("claude_model", "Claude 主控（Claude Code）", "default"),
+        ("gemini_model", "Gemini 独立评审（Antigravity）", "gemini-4-neon-high"),
+        ("codex_model", "Codex 执行", "default"),
+    ]
+    for field, label, default in roles:
+        if field == "claude_model" and args.claude_agy_model:
+            continue
+        value = getattr(args, field)
+        if value is None:
+            if args.use_defaults:
+                value = default
+            elif sys.stdin.isatty():
+                hint = "使用 CLI 当前配置" if default == "default" else default
+                value = input(f"{label}：输入型号，回车选择 {hint}：").strip() or default
+            else:
+                parser.error("请先选择三方模型；通过 --claude-model（或 --claude-agy-model）、"
+                             "--gemini-model、--codex-model 指定，或用 --use-defaults 接受其余默认值")
+        if not value.strip():
+            parser.error(f"{label}: empty model")
+        setattr(args, field, value.strip())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("brief", type=Path, help="UTF-8 task and shared background")
@@ -64,9 +89,13 @@ def main():
     parser.add_argument("--remote-file", action="append", default=[], type=PurePosixPath,
                         help="absolute path of a remote evidence file; repeat as needed")
     parser.add_argument("--control-socket", type=Path, help="existing SSH ControlPath")
-    parser.add_argument("--claude-agy-model", help="use the specified Claude model via agy")
+    lead_models = parser.add_mutually_exclusive_group()
+    lead_models.add_argument("--claude-model", help="Claude Code model or default")
+    lead_models.add_argument("--claude-agy-model", help="use the specified Claude model via agy")
     parser.add_argument("--out", required=True, type=Path, help="new run directory")
-    parser.add_argument("--gemini-model", default="gemini-4-neon-high", help="Antigravity model slug (see agy models)")
+    parser.add_argument("--gemini-model", help="Antigravity model slug (see agy models)")
+    parser.add_argument("--codex-model", help="Codex model or default")
+    parser.add_argument("--use-defaults", action="store_true", help="accept defaults for unspecified roles")
     parser.add_argument("--execute", action="store_true", help="allow Codex workspace writes")
     args = parser.parse_args()
     brief = args.brief.read_text(encoding="utf-8").strip()
@@ -85,6 +114,7 @@ def main():
             parser.error("remote filenames must be distinct")
     elif args.remote_file or args.control_socket:
         parser.error("--remote-file and --control-socket require --ssh-host")
+    select_models(args, parser)
     required = ["agy", "codex"]
     if not args.claude_agy_model:
         required.append("claude")
@@ -100,6 +130,13 @@ def main():
         (out / name).write_text(answer + "\n", encoding="utf-8")
         return answer
 
+    selection = {
+        "lead": {"cli": "agy" if args.claude_agy_model else "claude",
+                 "requested_model": args.claude_agy_model or args.claude_model},
+        "review": {"cli": "agy", "requested_model": args.gemini_model},
+        "worker": {"cli": "codex", "requested_model": args.codex_model},
+    }
+    save("models.json", json.dumps(selection, indent=2))
     save("00-brief.md", brief)
     if args.ssh_host:
         project = collect_evidence(args.ssh_host, args.remote_file, args.control_socket,
@@ -108,6 +145,8 @@ def main():
     else:
         project = args.project.resolve()
     claude = ["claude", "-p", "--tools", "", "--no-session-persistence"]
+    if args.claude_model and args.claude_model != "default":
+        claude.extend(["--model", args.claude_model])
     with tempfile.TemporaryDirectory() as temp:
         def lead(prompt):
             if args.claude_agy_model:
@@ -122,7 +161,10 @@ def main():
         plan = save("03-plan.md", lead(LEAD + "\n合并两份意见，列出分歧、取舍、验收条件。\n" + context))
         mode = "执行授权范围内的实验。" if args.execute else "只读审计并提出可执行方案。本次仅做规划。"
         command = ["codex", "exec", "--skip-git-repo-check", "--sandbox",
-                   "workspace-write" if args.execute else "read-only", "-"]
+                   "workspace-write" if args.execute else "read-only"]
+        if args.codex_model != "default":
+            command.extend(["--model", args.codex_model])
+        command.append("-")
         evidence = save("04-codex.md", call(command, f"{WORKER}\n{mode}\n用户任务\n{brief}\n方案\n{plan}", project))
         final = lead(f"{LEAD}\n根据执行者报告汇总结论，注明哪些证据由执行者核对，"
                      f"保留未解决分歧。\n{context}\n综合方案\n{plan}\n执行者报告\n{evidence}")
@@ -133,5 +175,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (EOFError, OSError, ValueError, subprocess.CalledProcessError) as exc:
         sys.exit(str(exc))
