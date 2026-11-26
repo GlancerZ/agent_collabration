@@ -1,4 +1,4 @@
-"""Run a research workflow with Claude, Gemini and Codex."""
+"""单轮串行辅助，无并发规划、执行检查点、独立双审或五步归档。"""
 import argparse
 import json
 import re
@@ -111,6 +111,7 @@ def main():
     parser.add_argument("--use-defaults", action="store_true", help="accept defaults for unspecified roles")
     parser.add_argument("--execute", action="store_true", help="execute in the selected local or remote workspace")
     args = parser.parse_args()
+    print("单轮串行辅助：无并发规划、执行检查点、独立双审或五步归档。", file=sys.stderr)
     select_models(args, parser)
     selection = {
         "lead": {"cli": "agy" if args.claude_agy_model else "claude",
