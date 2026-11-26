@@ -1,5 +1,5 @@
 ---
-name: spatial-research-agent
+name: research-agent
 description: 通用科研协作：Claude 主持，Claude、Gemini 和 Codex 独立规划，Claude 与 Gemini 独立验收，Codex 执行、自检并提出研究判断。用于研究设计、文献证据综合、理论推导、数据分析、模拟和实验结果复核。
 ---
 
@@ -22,7 +22,7 @@ description: 通用科研协作：Claude 主持，Claude、Gemini 和 Codex 独�
 在新终端或全新主持会话中，清空本次任务的选择，保留用户原有登录。从仓库根目录运行以下预览；它只询问并打印路由，不读研究数据、不连 SSH、不发模型请求。
 
 ```sh
-python3 skills/spatial-research-agent/scripts/research.py --show-routing
+python3 skills/research-agent/scripts/research.py --show-routing
 ```
 
 1. 验证先看见 Claude 来源选项，以及 Gemini 和 Codex 各自的固定入口；再填写各角色型号。对话主持者应在聊天中提问，不能为用户抢先填 `--use-defaults`。
@@ -85,7 +85,7 @@ Claude 核对后，用相同的位置参数执行 `check --decision 通过 --rea
 需要 Python 3.8+，以及已登录且可在终端非交互运行的 claude、agy（Google Antigravity CLI）和 codex。个人 Google 账号请按 [Antigravity 官方指南](https://antigravity.google/docs/getting-started?tab=cli) 安装 agy，运行 agy 登录。命令在 PATH 中可见时，从仓库根目录运行：
 
 ```sh
-python3 skills/spatial-research-agent/scripts/research.py brief.md --project /path/to/research-project --out runs/pilot-01
+python3 skills/research-agent/scripts/research.py brief.md --project /path/to/research-project --out runs/pilot-01
 ```
 
 安装成 skill 后使用本文件同目录下的 scripts/research.py。默认让 Codex 只读核对项目并规划。用户要求实际执行实验时加 --execute，让 Codex 在指定工作区内写入。Gemini 评审默认使用 Gemini 4 Neon High；通过 agy models 查看可用型号，用 --gemini-model 指定其他型号。选择 default 时，Claude Code 和 Codex 分别沿用各自的模型配置。Claude 和 Gemini 在临时目录工作，主控依据任务说明与执行报告整合结论。项目数据路径提供给 Codex，任务说明及各阶段文字输出可能传给对应的模型服务。
@@ -97,7 +97,7 @@ python3 skills/spatial-research-agent/scripts/research.py brief.md --project /pa
 当用户要求跑实验、实现改动或产出结果时，选择执行模式。模型选好后，三方先独立规划，主控在本机汇总派工，执行阶段通过 SSH 把任务交给服务器上已登录的 Codex CLI。它在指定项目目录使用 workspace-write，能编写脚本、运行分析并按集群规则提交作业。远程登录环境需要能找到 codex。若授权、沙箱或调度失败，报告具体原因和已完成阶段。交付前核对真实输出；对排队作业保留 job ID 并根据用户要求追踪到完成。
 
 ```sh
-python3 skills/spatial-research-agent/scripts/research.py brief.md \
+python3 skills/research-agent/scripts/research.py brief.md \
   --ssh-host my-cluster --remote-project /project/my-study --execute \
   --out runs/experiment-01
 ```
@@ -109,7 +109,7 @@ python3 skills/spatial-research-agent/scripts/research.py brief.md \
 三个模型的 CLI 都运行在本机。已有评估终表时，先确认作业状态、回单对应的实验条件和文件更新时间，再选取这次决策需要的汇总文件。通过已配置的 SSH 别名读取指定文件，Codex 在本地 evidence 副本中复核。每个文件使用不同的文件名。示例从仓库根目录运行：
 
 ```sh
-python3 skills/spatial-research-agent/scripts/research.py brief.md \
+python3 skills/research-agent/scripts/research.py brief.md \
   --ssh-host my-cluster \
   --remote-file /project/eval/results/paired.csv \
   --remote-file /project/eval/results/receipt.json \
