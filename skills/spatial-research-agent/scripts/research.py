@@ -39,13 +39,14 @@ def main():
     parser.add_argument("brief", type=Path, help="UTF-8 task and shared background")
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path, help="new run directory")
+    parser.add_argument("--gemini-model", default="gemini-4-neon-high", help="Antigravity model slug (see agy models)")
     parser.add_argument("--execute", action="store_true", help="allow Codex workspace writes")
     args = parser.parse_args()
     brief = args.brief.read_text(encoding="utf-8").strip()
     project = args.project.resolve()
     if not brief or not project.is_dir():
         parser.error("provide a nonempty brief and an existing project directory")
-    for cli in ("claude", "gemini", "codex"):
+    for cli in ("claude", "agy", "codex"):
         if not shutil.which(cli):
             parser.error(f"missing CLI on PATH: {cli}")
     out = args.out.resolve()
@@ -59,8 +60,9 @@ def main():
     claude = ["claude", "-p", "--tools", "", "--no-session-persistence"]
     with tempfile.TemporaryDirectory() as temp:
         draft = save("01-draft.md", call(claude, LEAD + "\n独立设计方案。\n" + brief, temp))
-        review = save("02-review.md", call(["gemini", "-p", REVIEW, "--output-format", "text"],
-                                           brief, temp))
+        review_command = ["agy", "--mode", "plan", "--model", args.gemini_model,
+                          "-p", REVIEW + "\n用户任务\n" + brief]
+        review = save("02-review.md", call(review_command, "", temp))
         context = f"用户任务\n{brief}\n\nClaude 草案\n{draft}\n\nGemini 独立评审\n{review}"
         plan = save("03-plan.md", call(claude, LEAD + "\n合并两份意见，列出分歧、取舍、验收条件。\n" + context, temp))
         mode = "执行授权范围内的实验。" if args.execute else "只读审计并提出可执行方案。本次仅做规划。"
