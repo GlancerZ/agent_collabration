@@ -38,16 +38,21 @@ def call(command, prompt, directory):
     return answer
 
 
-def collect_evidence(host, paths, socket, directory):
-    directory.mkdir()
+def ssh_command(host, socket):
     command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
     if socket:
         command.extend(["-S", str(socket)])
+    return command + [host]
+
+
+def collect_evidence(host, paths, socket, directory):
+    directory.mkdir()
+    command = ssh_command(host, socket)
     for path in paths:
         target = directory / path.name
         with tempfile.NamedTemporaryFile(dir=directory, delete=False) as staged:
             try:
-                subprocess.run(command + [host, "cat " + shlex.quote(str(path))],
+                subprocess.run(command + ["cat " + shlex.quote(str(path))],
                                stdin=subprocess.DEVNULL, stdout=staged, check=True)
             except BaseException:
                 Path(staged.name).unlink()
@@ -85,10 +90,11 @@ def main():
     parser.add_argument("brief", type=Path, help="UTF-8 task and shared background")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--project", type=Path)
-    source.add_argument("--ssh-host", help="configured SSH alias for reading remote results")
+    source.add_argument("--ssh-host", help="configured SSH alias for review or execution")
     parser.add_argument("--remote-file", action="append", default=[], type=PurePosixPath,
                         help="absolute path of a remote evidence file; repeat as needed")
     parser.add_argument("--control-socket", type=Path, help="existing SSH ControlPath")
+    parser.add_argument("--remote-project", type=PurePosixPath, help="run Codex in this absolute directory on the SSH host")
     lead_models = parser.add_mutually_exclusive_group()
     lead_models.add_argument("--claude-model", help="Claude Code model or default")
     lead_models.add_argument("--claude-agy-model", help="use the specified Claude model via agy")
@@ -96,7 +102,7 @@ def main():
     parser.add_argument("--gemini-model", help="Antigravity model slug (see agy models)")
     parser.add_argument("--codex-model", help="Codex model or default")
     parser.add_argument("--use-defaults", action="store_true", help="accept defaults for unspecified roles")
-    parser.add_argument("--execute", action="store_true", help="allow Codex workspace writes")
+    parser.add_argument("--execute", action="store_true", help="execute in the selected local or remote workspace")
     args = parser.parse_args()
     brief = args.brief.read_text(encoding="utf-8").strip()
     if not brief:
@@ -106,16 +112,23 @@ def main():
     if args.ssh_host is not None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.ssh_host):
             parser.error("use a configured SSH host alias")
-        if args.execute or not args.remote_file:
-            parser.error("remote review requires --remote-file and runs read-only")
+        if args.execute:
+            if args.remote_file:
+                parser.error("use remote project paths in the execution brief; --remote-file is for review")
+            if not args.remote_project or not args.remote_project.is_absolute():
+                parser.error("remote execution requires an absolute --remote-project")
+        elif not args.remote_file or args.remote_project:
+            parser.error("remote review requires --remote-file; use --execute with --remote-project")
         if any(not p.is_absolute() or p.name in ("", "..") for p in args.remote_file):
             parser.error("remote files must have absolute paths and filenames")
         if len({p.name for p in args.remote_file}) != len(args.remote_file):
             parser.error("remote filenames must be distinct")
-    elif args.remote_file or args.control_socket:
-        parser.error("--remote-file and --control-socket require --ssh-host")
+    elif args.remote_file or args.control_socket or args.remote_project:
+        parser.error("remote options require --ssh-host")
     select_models(args, parser)
-    required = ["agy", "codex"]
+    required = ["agy"]
+    if not args.remote_project:
+        required.append("codex")
     if not args.claude_agy_model:
         required.append("claude")
     if args.ssh_host:
@@ -138,7 +151,13 @@ def main():
     }
     save("models.json", json.dumps(selection, indent=2))
     save("00-brief.md", brief)
-    if args.ssh_host:
+    if args.remote_project:
+        project = out
+        remote_dir = shlex.quote(str(args.remote_project))
+        remote = ssh_command(args.ssh_host, args.control_socket)
+        subprocess.run(remote + [f"cd {remote_dir} && test -w . && codex --version"], check=True)
+        save("execution-target.txt", f"{args.ssh_host}:{args.remote_project}")
+    elif args.ssh_host:
         project = collect_evidence(args.ssh_host, args.remote_file, args.control_socket,
                                    out / "evidence")
         save("sources.txt", "\n".join(f"{args.ssh_host}:{p}" for p in args.remote_file))
@@ -165,6 +184,9 @@ def main():
         if args.codex_model != "default":
             command.extend(["--model", args.codex_model])
         command.append("-")
+        if args.remote_project:
+            command = remote + [f"cd {remote_dir} && exec " + shlex.join(command)]
+            mode += " 工作目录位于远程服务器。只执行原任务授权的工作，按集群规定提交计算作业，区分已提交与已核实的产物。"
         evidence = save("04-codex.md", call(command, f"{WORKER}\n{mode}\n用户任务\n{brief}\n方案\n{plan}", project))
         final = lead(f"{LEAD}\n根据执行者报告汇总结论，注明哪些证据由执行者核对，"
                      f"保留未解决分歧。\n{context}\n综合方案\n{plan}\n执行者报告\n{evidence}")

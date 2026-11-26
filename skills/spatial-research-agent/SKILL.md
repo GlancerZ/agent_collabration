@@ -21,6 +21,18 @@ python3 skills/spatial-research-agent/scripts/research.py brief.md --project /pa
 
 每次运行使用新的输出目录。依次保存原始任务、Claude 草案、Gemini 独立评审、综合方案、Codex 报告与最终结论。运行中断时查看最后完成的阶段和终端错误；重新执行前核对已生成的实验文件或已提交的作业。最终汇报引用项目中的证据路径，并区分已观察的结果与待验证的假设。
 
+## 在集群上实际执行
+
+当用户要求跑实验、实现改动或产出结果时，选择执行模式。模型选好后，主控在本机规划，Gemini 独立评审，执行阶段通过 SSH 把任务交给服务器上已登录的 Codex CLI。它在指定项目目录使用 workspace-write，能编写脚本、运行分析并按集群规则提交作业。远程登录环境需要能找到 codex。若授权、沙箱或调度失败，报告具体原因和已完成阶段。交付前核对真实输出；对排队作业保留 job ID 并根据用户要求追踪到完成。
+
+```sh
+python3 skills/spatial-research-agent/scripts/research.py brief.md \
+  --ssh-host my-cluster --remote-project /project/my-study --execute \
+  --out runs/experiment-01
+```
+
+可以复用下文的 --control-socket。三方只需一个 SSH 通道；Claude 和 Gemini 仍在本机调用。SSH 工作区由服务器端 Codex 自身的沙箱约束。
+
 ## 复核远程服务器已有结果
 
 三个模型的 CLI 都运行在本机。已有评估终表时，先确认作业状态、回单对应的实验条件和文件更新时间，再选取这次决策需要的汇总文件。通过已配置的 SSH 别名读取指定文件，Codex 在本地 evidence 副本中复核。每个文件使用不同的文件名。示例从仓库根目录运行：
@@ -33,7 +45,7 @@ python3 skills/spatial-research-agent/scripts/research.py brief.md \
   --out runs/remote-review-01
 ```
 
-SSH 默认复用别名配置的连接。已有独立 ControlMaster 时加 `--control-socket /path/to/socket`。账号需要 MFA 时，在终端完成一次该别名的认证，再复用连接。远程模式只读取列出的文件；文件和来源清单保存在本地运行目录。若需从逐供体预测重新计算，先在服务器按同一队列、任务、折和供体配对，导出汇总表后再交给模型。只取得队列均值时，在结论中注明配对区间尚待核实。任务说明可包含允许 Claude 和 Gemini 独立查看的队列级摘要。
+SSH 默认复用别名配置的连接。已有独立 ControlMaster 时加 `--control-socket /path/to/socket`。账号需要 MFA 时，在终端完成一次该别名的认证，再复用连接。远程复核模式只读取列出的文件；文件和来源清单保存在本地运行目录。若需从逐供体预测重新计算，先在服务器按同一队列、任务、折和供体配对，导出汇总表后再交给模型。只取得队列均值时，在结论中注明配对区间尚待核实。任务说明可包含允许 Claude 和 Gemini 独立查看的队列级摘要。
 
 比较新旧骨干时，把旧骨干上已有的强读出加入表格，核对两版同名读出的维数、归一化及每个分支的定义。对分支增益，分别用各自骨干的完整读出减去其基线，再按同一供体比较两版增益；报告分数单位、优化方向和区间。基线已经出现的版本差异需要单独解释。
 
