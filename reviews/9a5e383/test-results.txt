@@ -1,0 +1,5 @@
+PASS: fresh TTY, native source prompt before model prompts; empty PATH, zero provider calls
+PASS: fresh TTY, alternate source prompt before model prompts; empty PATH, zero provider calls
+PASS: headless without choices stops before creating files
+PASS: expected 5 CLI/model pairs; Claude failure stops without provider fallback
+Skill is valid!
