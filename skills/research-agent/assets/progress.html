@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Pipeline</title>
+<style>
+:root{
+  --bg:#f6f5f1; --panel:#ffffff; --ink:#1d1c1a; --muted:#6b6862; --line:#e3e0d8;
+  --lead:#c2410c; --claude:#b45309; --gemini:#2563eb; --codex:#0f766e; --jupiter:#7c3aed;
+  --ok:#15803d; --run:#d97706; --fail:#b91c1c; --idle:#a8a49b; --glow:rgba(217,119,6,.28);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#141412; --panel:#1d1c1a; --ink:#ecebe6; --muted:#a09d95; --line:#33312d;
+  --lead:#fb923c; --claude:#fbbf24; --gemini:#60a5fa; --codex:#2dd4bf; --jupiter:#a78bfa;
+  --ok:#4ade80; --run:#fbbf24; --fail:#f87171; --idle:#5d5a54; --glow:rgba(251,191,36,.22);
+}}
+:root[data-theme="dark"]{
+  --bg:#141412; --panel:#1d1c1a; --ink:#ecebe6; --muted:#a09d95; --line:#33312d;
+  --lead:#fb923c; --claude:#fbbf24; --gemini:#60a5fa; --codex:#2dd4bf; --jupiter:#a78bfa;
+  --ok:#4ade80; --run:#fbbf24; --fail:#f87171; --idle:#5d5a54; --glow:rgba(251,191,36,.22);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI",sans-serif}
+main{max-width:1120px;margin:0 auto;padding:24px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px;margin-bottom:18px}
+h1{font-size:20px;margin:0;font-weight:650}
+.sub{color:var(--muted);font-size:13px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;border:1px solid var(--line);background:var(--panel);font-size:12px;color:var(--muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--idle)}
+.live .dot{background:var(--ok);animation:blink 2s infinite}
+@keyframes blink{50%{opacity:.3}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.card h2{font-size:13px;letter-spacing:.04em;color:var(--muted);margin:0 0 12px;font-weight:600}
+.grid{display:grid;grid-template-columns:1.25fr 1fr;gap:16px}
+@media (max-width:820px){.grid{grid-template-columns:1fr}}
+/* rounds + stepper */
+.rounds{display:flex;flex-direction:column;gap:10px}
+.round{display:grid;grid-template-columns:64px 1fr;gap:10px;align-items:center}
+.round .rl{font-size:12px;color:var(--muted)}
+.steps{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+.step{border:1px solid var(--line);border-radius:8px;padding:7px 8px;font-size:12px;min-height:52px;position:relative;color:var(--muted)}
+.step b{display:block;font-size:11px;font-weight:600}
+.step.done{border-color:color-mix(in srgb,var(--ok) 45%,var(--line));color:var(--ink)}
+.step.done b{color:var(--ok)}
+.step.active{border-color:var(--run);color:var(--ink);box-shadow:0 0 0 3px var(--glow)}
+.step.active b{color:var(--run)}
+@media (max-width:560px){.steps{grid-template-columns:1fr}.round{grid-template-columns:1fr}}
+/* agent graph */
+svg.graph{width:100%;height:auto;display:block}
+.node rect{fill:var(--panel);stroke:var(--line);stroke-width:1.5}
+.node text{fill:var(--ink);font-size:13px;font-weight:600}
+.node .meta{fill:var(--muted);font-size:10.5px;font-weight:400}
+.node .state{font-size:10.5px;font-weight:600}
+.node.running rect{stroke:var(--c);stroke-width:2.5;filter:drop-shadow(0 0 10px var(--c))}
+.node.running .halo{stroke:var(--c);opacity:.55;animation:pulse 1.6s ease-out infinite;transform-box:fill-box;transform-origin:center}
+.node .halo{fill:none;stroke-width:2;opacity:0}
+.node.done rect{stroke:color-mix(in srgb,var(--ok) 55%,var(--line))}
+.node.failed rect{stroke:var(--fail)}
+.node.waiting rect{stroke-dasharray:4 3;stroke:var(--c)}
+@keyframes pulse{0%{transform:scale(1);opacity:.6}100%{transform:scale(1.12,1.35);opacity:0}}
+.edge{stroke:var(--line);stroke-width:1.6;fill:none}
+.edge.on{stroke:var(--c);stroke-dasharray:6 6;animation:flow .8s linear infinite;stroke-width:2}
+@keyframes flow{to{stroke-dashoffset:-12}}
+.task{fill:var(--muted);font-size:10.5px}
+/* tokens */
+.bars{display:flex;flex-direction:column;gap:10px}
+.bar{display:grid;grid-template-columns:92px 1fr 96px;gap:10px;align-items:center;font-size:12.5px}
+.track{height:10px;border-radius:5px;background:color-mix(in srgb,var(--line) 70%,transparent);overflow:hidden;display:flex}
+.track span{display:block;height:100%}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.legend{display:flex;gap:14px;font-size:11.5px;color:var(--muted);margin-top:10px;flex-wrap:wrap}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:11.5px}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tag{display:inline-block;padding:0 7px;border-radius:5px;font-size:11px;font-weight:600;color:#fff}
+.scroll{overflow-x:auto}
+.ev{display:flex;gap:10px;padding:6px 0;border-bottom:1px dashed var(--line);font-size:12.5px}
+.ev time{color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.empty{color:var(--muted);font-size:12.5px}
+.foot{color:var(--muted);font-size:11.5px;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">Research Pipeline</h1>
+    <span class="sub" id="limits"></span>
+    <span class="pill live" id="live"><span class="dot"></span><span id="updated">等待数据…</span></span>
+  </header>
+
+  <section class="card">
+    <h2>流程进度</h2>
+    <div class="rounds" id="rounds"></div>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Agent 状态 <span class="sub" style="font-weight:400">· 高亮 = 正在调用</span></h2>
+      <svg class="graph" id="graph" viewBox="0 0 640 330" role="img" aria-label="Agent graph"></svg>
+    </section>
+    <section class="card">
+      <h2>Token 用量（按 agent 累计）</h2>
+      <div class="bars" id="bars"></div>
+      <div class="legend">
+        <span><i style="background:var(--c1)"></i>输入（未缓存）</span>
+        <span><i style="background:var(--c2)"></i>缓存读</span>
+        <span><i style="background:var(--c3)"></i>缓存写</span>
+        <span><i style="background:var(--c4)"></i>输出</span>
+      </div>
+      <div class="foot" id="tokfoot"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>逐次调用</h2>
+    <div class="scroll"><table id="calls"></table></div>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2 id="jobs-title">集群作业</h2>
+      <div class="scroll"><table id="jobs"></table></div>
+    </section>
+    <section class="card">
+      <h2>事件</h2>
+      <div id="events"></div>
+    </section>
+  </div>
+</main>
+<script>
+const AG = {
+  lead:   {name:"主控 Claude", sub:"", c:"--lead",   x:250, y:20},
+  claude: {name:"Claude",      sub:"", c:"--claude", x:20,  y:200},
+  gemini: {name:"Gemini",      sub:"", c:"--gemini", x:180, y:200},
+  codex:  {name:"Codex",       sub:"", c:"--codex", x:340, y:200},
+  jupiter:{name:"集群",         sub:"", c:"--jupiter",x:500, y:200},
+};
+const W=140,H=64, STATE_TXT={idle:"空闲",running:"调用中",done:"已完成",failed:"失败",waiting:"等待"};
+const fmt=n=>n==null?"—":n>=1e6?(n/1e6).toFixed(2)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":String(n);
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const modelLabel=id=>({"claude-opus-5-5":"Claude Opus 5.5","claude-fable-5-2":"Claude Fable 5.2"}[id]||id);
+const hm=t=>{try{const d=new Date(t);return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})}catch(e){return t}};
+
+function render(s){
+  for(const [k,m] of Object.entries(s.models||{})) if(AG[k]) AG[k].sub=m;
+  if(s.cluster_name) AG.jupiter.name=s.cluster_name;
+  document.documentElement.style.setProperty("--c1",css("--idle"));
+  document.documentElement.style.setProperty("--c2","color-mix(in srgb, var(--gemini) 35%, transparent)");
+  document.documentElement.style.setProperty("--c3","color-mix(in srgb, var(--jupiter) 55%, transparent)");
+  document.documentElement.style.setProperty("--c4",css("--run"));
+  document.getElementById("title").textContent=s.project+" · Research Pipeline";
+  document.getElementById("limits").textContent=[s.limits, s.max_rounds ? "" : "轮数未设上限"].filter(Boolean).join(" · ");
+  const age=(Date.now()-new Date(s.updated))/1000;
+  document.getElementById("updated").textContent="更新于 "+hm(s.updated)+(age<90?" · 实时":"");
+
+  // rounds
+  let rh="";
+  for(let r=1;r<=Math.max(s.round,s.max_rounds||0);r++){
+    rh+=`<div class="round"><div class="rl">第 ${r} 轮${r===s.round?" ◀":""}</div><div class="steps">`;
+    s.steps.forEach((name,i)=>{
+      const k=i+1; let cls="";
+      if(r<s.round||(r===s.round&&k<s.step))cls="done";
+      else if(r===s.round&&k===s.step)cls="active";
+      const lab=(cls==="active"&&s.step_label&&s.step_label!==name)?s.step_label:name;
+      rh+=`<div class="step ${cls}"><b>${cls==="done"?"✓ ":cls==="active"?"● ":""}步骤 ${k}</b>${esc(lab)}</div>`;
+    });
+    rh+=`</div></div>`;
+  }
+  document.getElementById("rounds").innerHTML=rh;
+
+  // graph
+  let g="";
+  const center=a=>[AG[a].x+W/2,AG[a].y+H/2];
+  const edge=(a,b)=>{
+    const on=s.agents[a]?.state==="running"&&s.agents[b]?.state==="running";
+    const [x1,y1]=[AG[a].x+W/2,AG[a].y+H]; const [x2,y2]=b==="jupiter"&&a==="codex"?[AG[b].x,AG[b].y+H/2]:[AG[b].x+W/2,AG[b].y];
+    const sx=a==="codex"&&b==="jupiter"?AG[a].x+W:x1, sy=a==="codex"&&b==="jupiter"?AG[a].y+H/2:y1;
+    const d=a==="codex"&&b==="jupiter"?`M${sx},${sy} L${x2},${y2}`:`M${sx},${sy} C${sx},${sy+60} ${x2},${y2-60} ${x2},${y2}`;
+    const c=css(AG[b].c);
+    return `<path class="edge ${on?"on":""}" style="--c:${c}" d="${d}"/>`;
+  };
+  ["claude","gemini","codex"].forEach(b=>g+=edge("lead",b));
+  g+=edge("codex","jupiter");
+  for(const [k,a] of Object.entries(AG)){
+    const st=s.agents[k]||{state:"idle"}; const c=css(a.c);
+    const sc={running:css("--run"),done:css("--ok"),failed:css("--fail"),waiting:c}[st.state]||css("--muted");
+    g+=`<g class="node ${st.state}" style="--c:${c}">
+      <rect class="halo" x="${a.x}" y="${a.y}" width="${W}" height="${H}" rx="10"/>
+      <rect x="${a.x}" y="${a.y}" width="${W}" height="${H}" rx="10"/>
+      <rect x="${a.x}" y="${a.y}" width="5" height="${H}" rx="2" style="fill:${c};stroke:none;filter:none"/>
+      <text x="${a.x+14}" y="${a.y+22}">${a.name}</text>
+      <text class="meta" x="${a.x+14}" y="${a.y+38}">${a.sub}</text>
+      <text class="state" x="${a.x+14}" y="${a.y+54}" style="fill:${sc}">${st.state==="running"?"● ":""}${STATE_TXT[st.state]||st.state}</text>
+    </g>`;
+    if(st.task){
+      const ty=k==="lead"?a.y+H+16:a.y+H+16; const lines=wrap(st.task,13).slice(0,4);
+      lines.forEach((ln,i)=>g+=`<text class="task" x="${a.x+4}" y="${ty+i*14}">${esc(ln)}</text>`);
+    }
+  }
+  document.getElementById("graph").innerHTML=g;
+
+  // token totals
+  const tot={}; for(const k of Object.keys(AG))tot[k]={input:0,cache_read:0,cache_write:0,output:0,unk:0,n:0};
+  for(const c of s.calls){const t=tot[c.agent];if(!t)continue;t.n++;
+    if(c.input==null&&c.output==null&&c.total==null){t.unk++;continue}
+    t.input+=c.input||0;t.cache_read+=c.cache_read||0;t.cache_write+=c.cache_write||0;t.output+=c.output||0;
+    if(c.total!=null&&c.input==null&&c.output==null)t.input+=c.total;}
+  const lu=s.lead_usage||{}; if(lu.requests)tot.lead={input:lu.input||0,cache_read:lu.cache_read||0,cache_write:lu.cache_write||0,output:lu.output||0,unk:0,n:lu.requests||0};
+  const sum=t=>t.input+t.cache_read+t.cache_write+t.output;
+  const max=Math.max(1,...Object.values(tot).map(sum));
+  let bh="";
+  for(const [k,a] of Object.entries(AG)){
+    if(k==="jupiter")continue; const t=tot[k]; const S=sum(t);
+    const seg=(v,col)=>v?`<span style="width:${100*v/max}%;background:${col}"></span>`:"";
+    bh+=`<div class="bar"><div><b style="color:${css(a.c)}">${a.name}</b><div class="sub">${t.n} 次${k==="lead"?"请求":"调用"}${t.unk?` · ${t.unk} 次未记录`:""}</div></div>
+      <div class="track">${seg(t.input,"var(--c1)")}${seg(t.cache_read,"var(--c2)")}${seg(t.cache_write,"var(--c3)")}${seg(t.output,"var(--c4)")}</div>
+      <div class="num"><b>${fmt(S)}</b><div class="sub">输出 ${fmt(t.output)}</div></div></div>`;
+  }
+  document.getElementById("bars").innerHTML=bh;
+  document.getElementById("tokfoot").textContent="主控 = 主持会话全部请求（含缓存），由 progress.py 从会话记录去重统计；Codex CLI 只报告合计；未记录 = 调用时没有取得用量。";
+
+  // calls
+  let ch=`<tr><th>时间</th><th>Agent</th><th>阶段</th><th>型号</th><th class="n">输入</th><th class="n">缓存读</th><th class="n">缓存写</th><th class="n">输出</th><th class="n">合计</th><th>状态</th></tr>`;
+  if(!s.calls.length)ch+=`<tr><td colspan="10" class="empty">暂无</td></tr>`;
+  for(const c of [...s.calls].reverse()){
+    const a=AG[c.agent]; const total=c.total??((c.input||0)+(c.cache_read||0)+(c.cache_write||0)+(c.output||0)||null);
+    const col={ok:css("--ok"),failed:css("--fail"),running:css("--run")}[c.status]||css("--muted");
+    ch+=`<tr><td>${hm(c.t)}</td><td><span class="tag" style="background:${css(a.c)}">${a.name}</span></td><td>${esc(c.phase)}${c.note?`<div class="sub">${esc(c.note)}</div>`:""}</td><td title="${esc(c.model)}">${esc(modelLabel(c.model))}</td>
+      <td class="n">${fmt(c.input)}</td><td class="n">${fmt(c.cache_read)}</td><td class="n">${fmt(c.cache_write)}</td><td class="n">${fmt(c.output)}</td><td class="n"><b>${fmt(total)}</b></td>
+      <td style="color:${col}">${esc(c.status)}</td></tr>`;
+  }
+  document.getElementById("calls").innerHTML=ch;
+
+  // jobs
+  document.getElementById("jobs-title").textContent=(s.cluster_name||"集群")+" 作业";
+  let jh=`<tr><th>作业号</th><th>名称</th><th>状态</th><th>备注</th></tr>`;
+  if(!s.jobs.length)jh+=`<tr><td colspan="4" class="empty">本次任务尚未提交作业</td></tr>`;
+  for(const j of [...s.jobs].reverse()){
+    const col=/RUN|PEND/.test(j.state)?css("--run"):/COMPLETED|OK/.test(j.state)?css("--ok"):/FAIL|CANCEL|TIMEOUT/.test(j.state)?css("--fail"):css("--muted");
+    jh+=`<tr><td>${esc(j.id)}</td><td>${esc(j.name)}${j.gpus?`<div class="sub">${j.gpus} GPU</div>`:""}</td><td style="color:${col};font-weight:600">${esc(j.state)}</td><td>${esc(j.note)}</td></tr>`;
+  }
+  document.getElementById("jobs").innerHTML=jh;
+
+  // events
+  const ev=[...s.events].reverse().slice(0,40);
+  document.getElementById("events").innerHTML=ev.length?ev.map(e=>`<div class="ev"><time>${hm(e.t)}</time><span style="color:${css(AG[e.agent]?.c||"--muted")};font-weight:600;white-space:nowrap">${AG[e.agent]?.name||""}</span><span>${esc(e.text)}</span></div>`).join(""):`<div class="empty">暂无</div>`;
+}
+function wrap(t,n){const out=[];let s=String(t);while(s.length>n){out.push(s.slice(0,n));s=s.slice(n)}if(s)out.push(s);return out}
+
+// Poll status.js (works from file:// — a fresh <script> tag each time)
+function poll(){
+  const el=document.createElement("script"); el.src="status.js?t="+Date.now();
+  el.onload=()=>{try{window.PIPELINE_STATUS&&render(window.PIPELINE_STATUS)}catch(e){console.error(e)}el.remove()};
+  el.onerror=()=>{document.getElementById("updated").textContent="未找到 status.js";el.remove()};
+  document.body.appendChild(el);
+}
+poll(); setInterval(poll,5000);
+</script>
+</body>
+</html>
