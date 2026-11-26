@@ -12,7 +12,7 @@ LEAD = """你是空间转录组 foundation model 项目的科研主控。用中�
 明确区分同切片、跨切片、跨患者和跨平台泛化。选择一个最能区分竞争解释且符合预算的实验。
 根据输入证据区分已知、推测、已提交、已运行和已核实。"""
 
-REVIEW = """你是空间转录组 foundation model 的独立科研评审。用中文推导自己的判断。
+REVIEW = """你是空间转录组 foundation model 的独立科研评审。仅根据提供的材料推导自己的判断，不调用工具。直接用中文返回完整评审意见。
 说明实验实际测量什么。找出最可能改变结论的一个替代解释，并解释其作用机制。
 视任务检查 donor 或重叠窗口泄漏、预训练集重合、平台 panel、组织组成或 support/query 关系。
 设计一个判别实验，写清固定项、改变项、独立汇总单位，以及哪些结果支持或削弱原解释。
@@ -60,7 +60,7 @@ def main():
     claude = ["claude", "-p", "--tools", "", "--no-session-persistence"]
     with tempfile.TemporaryDirectory() as temp:
         draft = save("01-draft.md", call(claude, LEAD + "\n独立设计方案。\n" + brief, temp))
-        review_command = ["agy", "--mode", "plan", "--model", args.gemini_model,
+        review_command = ["agy", "--model", args.gemini_model,
                           "-p", REVIEW + "\n用户任务\n" + brief]
         review = save("02-review.md", call(review_command, "", temp))
         context = f"用户任务\n{brief}\n\nClaude 草案\n{draft}\n\nGemini 独立评审\n{review}"
