@@ -1,4 +1,4 @@
-"""Run a spatial foundation model study with Claude, Gemini and Codex."""
+"""Run a research workflow with Claude, Gemini and Codex."""
 import argparse
 import json
 import re
@@ -9,24 +9,18 @@ import sys
 import tempfile
 from pathlib import Path, PurePosixPath
 
-LEAD = """你是空间转录组 foundation model 项目的科研主控。用中文回答。
-把细胞表达、邻域和组织尺度的主张分开。说明推理时可见的信息、预测对象和独立评估单位。
-比较 checkpoint 时核对数据暴露、采样、空间图和读出。多因素变化只能支持整体版本结论。
-明确区分同切片、跨切片、跨患者和跨平台泛化。选择一个最能区分竞争解释且符合预算的实验。
-根据输入证据区分已知、推测、已提交、已运行和已核实。"""
+LEAD = """你是跨学科科研项目的主控，用中文回答。围绕研究者要作出的决定，明确问题、假设、证据与验收标准。
+按项目选择合适的方法，例如原文查证、证明、观察比较、计算实验或复现。只有材料支持时才作因果或推广判断。
+沿用用户设定的资源与轮数限制；未设的数值留空。区分已有事实、推测、下一步和已验收成果。"""
 
-REVIEW = """你是空间转录组 foundation model 的独立科研评审。仅根据提供的材料推导自己的判断，不调用工具。直接用中文返回完整评审意见。
-说明实验实际测量什么。找出最可能改变结论的一个替代解释，并解释其作用机制。
-视任务检查 donor 或重叠窗口泄漏、预训练集重合、平台 panel、组织组成或 support/query 关系。
-设计一个判别实验，写清固定项、改变项、独立汇总单位，以及哪些结果支持或削弱原解释。
-优先考虑已有 checkpoint。无法确定的信息请点名需要查的记录。"""
+REVIEW = """你是独立科研评审。根据收到的共同材料独立推理，不调用工具，直接用中文回答。
+给出自己的方案、最重要的替代解释或反例，以及什么证据可以区分它们。指出影响决策的假设和缺失材料。
+按问题类型检查来源、推导、实验设计或评价方法。说明怎样判断研究目标达成。"""
 
-WORKER = """你负责空间模型的实验执行。以用户原始任务与资源限制为准，计划是建议。
-检查实际配置、split、checkpoint、样本与特征对齐。根据任务检查空间图边界、坐标单位、
-缺失 panel 和 masking 泄漏。比较版本时配对评估样本并说明覆盖率，按适当的 donor 或
-cohort 汇总。执行时先跑真实数据小样例。给出证据路径、实际运行状态、结果及局限；
-已有结果先核对终表是否遗漏旧骨干的强读出。按 cohort、任务、fold 和 donor 配对，核对维数、归一化和特征公式；仅有队列均值时不得声称已复算供体区间。能配对时分开报告版本总分变化及相对各自相同基线的增益变化，注明指标方向和区间单位。
-细胞数、独立样本数与训练 visits 分开报告。输出中文报告。"""
+WORKER = """你负责科研执行与自检。以用户原始任务、授权范围和实际设定的限制为准，用中文报告。
+先核对材料来源与版本，复用已有成果。按任务实际完成检索整理、推导核对、分析、代码实现或实验评估。
+记录方法、关键假设、可核验产物和自检结果。数值比较说明评价口径、单位、基线和不确定性；
+文献结论指向原始证据；理论结论明确成立条件。外部实验与调度任务区分已计划、已提交、已完成和已核实。"""
 
 
 def call(command, prompt, directory):
@@ -62,6 +56,17 @@ def collect_evidence(host, paths, socket, directory):
 
 
 def select_models(args, parser):
+    if (not args.claude_model and not args.claude_agy_model and not args.use_defaults
+            and sys.stdin.isatty()):
+        print("先选客户端来源：Gemini 评审走 Antigravity，执行走 Codex。")
+        choice = input("Claude 主控与独审用哪个入口？1 自己的 Claude Code；"
+                       "2 Antigravity 的 Claude [1]：").strip() or "1"
+        if choice == "2":
+            args.claude_agy_model = input("输入 agy models 中的 Claude 型号：").strip()
+            if not args.claude_agy_model:
+                parser.error("选择 Antigravity 时需要指定 Claude 型号")
+        elif choice != "1":
+            parser.error("Claude 来源须选 1 或 2")
     roles = [
         ("claude_model", "Claude 主控（Claude Code）", "default"),
         ("gemini_model", "Gemini 独立评审（Antigravity）", "gemini-4-neon-high"),
@@ -87,8 +92,9 @@ def select_models(args, parser):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("brief", type=Path, help="UTF-8 task and shared background")
-    source = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--show-routing", action="store_true", help="select and print requested routes without contacting providers")
+    parser.add_argument("brief", nargs="?", type=Path, help="UTF-8 task and shared background")
+    source = parser.add_mutually_exclusive_group()
     source.add_argument("--project", type=Path)
     source.add_argument("--ssh-host", help="configured SSH alias for review or execution")
     parser.add_argument("--remote-file", action="append", default=[], type=PurePosixPath,
@@ -98,12 +104,24 @@ def main():
     lead_models = parser.add_mutually_exclusive_group()
     lead_models.add_argument("--claude-model", help="Claude Code model or default")
     lead_models.add_argument("--claude-agy-model", help="use the specified Claude model via agy")
-    parser.add_argument("--out", required=True, type=Path, help="new run directory")
+    parser.add_argument("--out", type=Path, help="new run directory")
     parser.add_argument("--gemini-model", help="Antigravity model slug (see agy models)")
     parser.add_argument("--codex-model", help="Codex model or default")
     parser.add_argument("--use-defaults", action="store_true", help="accept defaults for unspecified roles")
     parser.add_argument("--execute", action="store_true", help="execute in the selected local or remote workspace")
     args = parser.parse_args()
+    select_models(args, parser)
+    selection = {
+        "lead": {"cli": "agy" if args.claude_agy_model else "claude",
+                 "requested_model": args.claude_agy_model or args.claude_model},
+        "review": {"cli": "agy", "requested_model": args.gemini_model},
+        "worker": {"cli": "codex", "requested_model": args.codex_model},
+    }
+    if args.show_routing:
+        print(json.dumps(selection, indent=2))
+        return
+    if not args.brief or not args.out or not (args.project or args.ssh_host):
+        parser.error("a run requires a brief, --out, and either --project or --ssh-host")
     brief = args.brief.read_text(encoding="utf-8").strip()
     if not brief:
         parser.error("empty brief")
@@ -125,7 +143,6 @@ def main():
             parser.error("remote filenames must be distinct")
     elif args.remote_file or args.control_socket or args.remote_project:
         parser.error("remote options require --ssh-host")
-    select_models(args, parser)
     required = ["agy"]
     if not args.remote_project:
         required.append("codex")
@@ -143,12 +160,6 @@ def main():
         (out / name).write_text(answer + "\n", encoding="utf-8")
         return answer
 
-    selection = {
-        "lead": {"cli": "agy" if args.claude_agy_model else "claude",
-                 "requested_model": args.claude_agy_model or args.claude_model},
-        "review": {"cli": "agy", "requested_model": args.gemini_model},
-        "worker": {"cli": "codex", "requested_model": args.codex_model},
-    }
     save("models.json", json.dumps(selection, indent=2))
     save("00-brief.md", brief)
     if args.remote_project:
