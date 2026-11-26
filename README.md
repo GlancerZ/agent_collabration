@@ -1,6 +1,8 @@
 # Agent Collaboration Skills
 
-让本机的 **Codex CLI** 和 **Claude Code** 协作的两个 skill。两者都使用你已有的 CLI 登录和额度，不需要新的模型 API Key。
+本仓库提供本地双模型聊天室、Slack 协作工具和空间模型科研工作流。
+
+**[空间模型科研 agent](skills/spatial-research-agent/SKILL.md)** 使用 Claude 规划、Gemini 独立评审、Codex 核对项目或执行实验，适合做空间消融、预训练版本比较和跨患者评估。
 
 | | [local-agent-room](skills/local-agent-room/SKILL.md)（推荐） | [slack-dual-agent](skills/slack-dual-agent/SKILL.md) |
 | --- | --- | --- |
