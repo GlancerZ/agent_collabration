@@ -188,14 +188,23 @@ def main():
         review_command = ["agy", "--model", args.gemini_model,
                           "-p", REVIEW + "\n用户任务\n" + brief]
         review = save("02-review.md", call(review_command, "", temp))
-        context = f"用户任务\n{brief}\n\nClaude 草案\n{draft}\n\nGemini 独立评审\n{review}"
-        plan = save("03-plan.md", lead(LEAD + "\n合并两份意见，列出分歧、取舍、验收条件。\n" + context))
+        def codex_command(sandbox):
+            cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", sandbox]
+            if args.codex_model != "default":
+                cmd.extend(["--model", args.codex_model])
+            return cmd + ["-"]
+
+        planner = codex_command("read-only")
+        if args.remote_project:
+            cleanup = shlex.quote('rmdir "$d"')
+            planner = remote + [f'd=$(mktemp -d) || exit 1; trap {cleanup} EXIT; '
+                                'cd "$d" && ' + shlex.join(planner)]
+        codex_plan = save("02-codex-plan.md", call(planner, REVIEW + "\n用户任务\n" + brief, temp))
+        context = (f"用户任务\n{brief}\n\nClaude 草案\n{draft}\n\nGemini 独立方案\n{review}"
+                   f"\n\nCodex 独立方案\n{codex_plan}")
+        plan = save("03-plan.md", lead(LEAD + "\n合并三份方案，列出分歧、取舍、验收条件。\n" + context))
         mode = "执行授权范围内的实验。" if args.execute else "只读审计并提出可执行方案。本次仅做规划。"
-        command = ["codex", "exec", "--skip-git-repo-check", "--sandbox",
-                   "workspace-write" if args.execute else "read-only"]
-        if args.codex_model != "default":
-            command.extend(["--model", args.codex_model])
-        command.append("-")
+        command = codex_command("workspace-write" if args.execute else "read-only")
         if args.remote_project:
             command = remote + [f"cd {remote_dir} && exec " + shlex.join(command)]
             mode += " 工作目录位于远程服务器。只执行原任务授权的工作，按集群规定提交计算作业，区分已提交与已核实的产物。"
