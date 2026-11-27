@@ -10,7 +10,11 @@ import tempfile
 
 
 def fingerprint(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def approved(chair, hashes):
@@ -21,10 +25,14 @@ def approved(chair, hashes):
     return record.get("status") == "通过" and record.get("inputs") == hashes
 
 
+def sealed_draft_path(chair, tag):
+    return chair / "封存首稿" / (hashlib.sha256(tag.encode()).hexdigest() + ".md")
+
+
 def seal_draft(chair, tag, source):
-    folder = chair / "封存首稿"
+    path = sealed_draft_path(chair, tag)
+    folder = path.parent
     folder.mkdir(mode=0o700, exist_ok=True)
-    path = folder / (hashlib.sha256(tag.encode()).hexdigest() + ".md")
     data = source.read_bytes()
     if not data.strip():
         raise ValueError("empty draft")

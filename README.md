@@ -2,7 +2,7 @@
 
 本仓库提供本地双模型聊天室、Slack 协作工具和通用科研工作流。
 
-**[通用科研 agent](skills/research-agent/SKILL.md)** 由 Claude、Gemini 和 Codex 各自规划，Claude 与 Gemini 独立验收，Codex 执行、自检并提出结果解读，最后由 Claude 汇总三方意见，适用于研究设计、证据综合、理论推导与计算实验。
+**[通用科研 agent](skills/research-agent/SKILL.md)** 由 Opus 主控，开始时按任务定档。研究任务走标准档：三方独立规划，Codex 执行，三方书面审阅，再由 Opus 总验收。可测试的工程任务走轻量档：主控自写计划，Codex 实现，默认一方审阅。[workflow.py](skills/research-agent/scripts/workflow.py) 处理并行派发、回执封存、作业状态、看板、阶段交接和断点恢复。SKILL.md 只放每次都要用的规则，命令、模板、计算资源和恢复细节放在 [references/](skills/research-agent/references/)，用到再读。
 
 | | [local-agent-room](skills/local-agent-room/SKILL.md)（推荐） | [slack-dual-agent](skills/slack-dual-agent/SKILL.md) |
 | --- | --- | --- |

@@ -8,9 +8,11 @@ The chair updates state with this script at every hand-off.
   progress.py 项目 init --title 名称 --limits "≤8 GPU · 2 轮" --max-rounds 2 \
       --model lead="Opus 5.5 · xhigh" --model claude="Fable 5.2 · xhigh" \
       --model gemini="4 Neon · XHigh" --model codex="gpt-6.2-astra · max" --cluster JUPITER
+  progress.py 项目 init --lead-transcript 会话.jsonl --lead-root 主控工作目录
   progress.py 项目 stage 1 3 ["Codex 执行 · 尝试-01 试跑"]
   progress.py 项目 agent codex running "尝试-01 实现与试跑"      # idle|running|waiting|done|failed
   progress.py 项目 call claude "第1轮·规划" --model claude-fable-5-2 --from-claude-json out.json
+  progress.py 项目 call codex "第1轮·规划" --model gpt-6.2-astra --from-codex-session <session_id> [--since 2026-11-26T21:00:00Z]
   progress.py 项目 call codex "第1轮·规划" --model gpt-6.2-astra --from-codex-log codex.log
   progress.py 项目 call gemini "第1轮·规划" --model gemini-4-neon-xhigh --from-agy-json out.json
   progress.py 项目 call gemini "第1轮·规划" --replace 6 --from-agy-transcript ~/.gemini/antigravity-cli/brain/<对话ID>
@@ -26,6 +28,7 @@ from pathlib import Path
 AGENTS = ["lead", "claude", "gemini", "codex", "jupiter"]
 STEPS = ["独立规划", "Claude 汇总派工", "Codex 执行（试跑→检查点→正式）", "三方并行核验", "Claude 总验收与转向"]
 TEMPLATE = Path(__file__).resolve().parent.parent / "assets" / "progress.html"
+CODEX_UUID = r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}"
 
 
 def now():
@@ -44,7 +47,8 @@ def atomic_text(path, text):
     os.replace(f.name, path)
 
 
-def lead_usage(paths, project):
+def lead_usage(paths, project, lead_roots=()):
+    roots = {Path(root).expanduser().resolve() for root in (project, *lead_roots)}
     seen = {}
     for path in paths:
         with Path(path).open(encoding="utf-8") as stream:
@@ -56,7 +60,7 @@ def lead_usage(paths, project):
                 if row.get("type") != "assistant" or not row.get("cwd"):
                     continue
                 cwd = Path(row["cwd"]).resolve()
-                if cwd != project and project not in cwd.parents:
+                if cwd not in roots and roots.isdisjoint(cwd.parents):
                     continue
                 msg = row.get("message") or {}
                 if msg.get("id") and msg.get("usage"):
@@ -67,18 +71,98 @@ def lead_usage(paths, project):
     return dict(requests=len(seen), **{k: sum(u.get(v) or 0 for u in seen.values()) for k,v in fields.items()})
 
 
-def from_claude_json(path):
-    o = json.loads(Path(path).read_text(encoding="utf-8"))
-    u = o.get("usage") or {}
+def claude_usage(result):
+    u = result.get("usage") or {}
     return {"input": u.get("input_tokens"), "output": u.get("output_tokens"),
             "cache_read": u.get("cache_read_input_tokens"), "cache_write": u.get("cache_creation_input_tokens"),
-            "seconds": (o.get("duration_ms") or 0) / 1000 or None}
+            "seconds": (result.get("duration_ms") or 0) / 1000 or None}
+
+
+def from_claude_json(path):
+    return claude_usage(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def codex_log_usage(text):
+    m = re.findall(r"tokens used\s*\n\s*([\d,]+)", text)
+    return {"total": int(m[-1].replace(",", ""))} if m else {}
 
 
 def from_codex_log(path):
-    text = Path(path).read_text(encoding="utf-8", errors="replace")
-    m = re.findall(r"tokens used\s*\n\s*([\d,]+)", text)
-    return {"total": int(m[-1].replace(",", ""))} if m else {}
+    return codex_log_usage(Path(path).read_text(encoding="utf-8", errors="replace"))
+
+
+def codex_session_path(value):
+    if not value.strip():
+        raise ValueError("empty Codex session identifier")
+    path = Path(value).expanduser()
+    if path.is_file():
+        return path
+    if path.exists() or "/" in value:
+        raise ValueError(f"expected an existing rollout file: {path}")
+    if not re.fullmatch(CODEX_UUID, value):
+        raise ValueError("supply the full Codex session UUID or a rollout file")
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    matches = sorted((home / "sessions").rglob(f"rollout-*-{value}.jsonl"))
+    if not matches:
+        raise FileNotFoundError(f"Codex session not found: {value}")
+    if len(matches) > 1:
+        raise ValueError("ambiguous session; supply a file: " + ", ".join(map(str, matches)))
+    return matches[0]
+
+
+def utc_time(value):
+    if not isinstance(value, str):
+        raise ValueError("expected an ISO timestamp with timezone")
+    # Python 3.9 parses only three or six fractional digits, so parse whole seconds and
+    # compare the fraction as digits (trailing zeros dropped) at any precision.
+    match = re.search(r"(?<=\d{2}:\d{2}:\d{2})[.,](\d+)", value)
+    fraction = match[1].rstrip("0") if match else ""
+    if match:
+        value = value[:match.start()] + value[match.end():]
+    timestamp = dt.datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    if timestamp.utcoffset() is None:
+        raise ValueError("timestamp requires a timezone")
+    return timestamp.astimezone(dt.timezone.utc), fraction
+
+
+def from_codex_session(path_or_id, since=None):
+    """Sum changes in cumulative counters at or after the inclusive cutoff."""
+    start = utc_time(since) if since is not None else None
+    previous = (0, 0, 0)
+    sums = [0, 0, 0]
+    found = False
+    path = codex_session_path(path_or_id)
+    with path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, 1):
+            try:
+                row = json.loads(line)
+                raw_time = row.get("timestamp")
+                payload = row["payload"]
+                if payload.get("type") != "token_count":
+                    continue
+                usage = payload["info"]["total_token_usage"]
+                raw, cached, output = (usage[k] for k in ("input_tokens", "cached_input_tokens", "output_tokens"))
+                if not all(type(v) is int for v in (raw, cached, output)):
+                    continue
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
+            try:
+                timestamp = utc_time(raw_time)
+            except (ValueError, TypeError) as error:
+                if start is not None:
+                    raise ValueError(f"invalid token-count timestamp in {path.name} at line {line_number}") from error
+                continue
+            current = (raw - cached, cached, output)
+            delta = [n - old for n, old in zip(current, previous)]
+            if min(delta) < 0:
+                raise ValueError("Codex cumulative token counters decreased; inspect the rollout")
+            previous = current
+            if start is None or timestamp >= start:
+                found = True
+                sums = [total + change for total, change in zip(sums, delta)]
+    if not found:
+        raise ValueError("no valid usage events in the requested window")
+    return dict(zip(("input", "cache_read", "output"), sums))
 
 
 def _agy_usage(u):
@@ -136,7 +220,7 @@ class Board:
             return json.loads(self.state.read_text(encoding="utf-8"))
         return {"project": Path(self.dir.parent).name, "max_rounds": None, "round": 1, "step": 1,
                 "step_label": STEPS[0], "steps": STEPS, "limits": "", "models": {}, "cluster_name": "集群",
-                "lead_transcripts": [],
+                "lead_transcripts": [], "lead_roots": [],
                 "agents": {a: {"state": "idle", "task": ""} for a in AGENTS},
                 "calls": [], "jobs": [], "events": [], "lead_usage": {}}
 
@@ -144,7 +228,7 @@ class Board:
         self.dir.mkdir(parents=True, exist_ok=True)
         s.pop("lead_transcript", None)  # Older versions could select another project's transcript.
         paths = s.setdefault("lead_transcripts", [])
-        s["lead_usage"] = lead_usage(paths, self.dir.parent) if paths else {}
+        s["lead_usage"] = lead_usage(paths, self.dir.parent, s.get("lead_roots", [])) if paths else {}
         s["updated"] = now()
         atomic_text(self.state, json.dumps(s, ensure_ascii=False, indent=1))
         atomic_text(self.dir / "status.js", "window.PIPELINE_STATUS = " + json.dumps(s, ensure_ascii=False) + ";\n")
@@ -160,6 +244,8 @@ def main():
     a.add_argument("--title"); a.add_argument("--limits"); a.add_argument("--max-rounds", type=int)
     a.add_argument("--model", action="append", default=[], help="role=label, role in " + ",".join(AGENTS))
     a.add_argument("--cluster"); a.add_argument("--lead-transcript")
+    a.add_argument("--lead-root", type=Path, action="append", default=[],
+                   help="include cwd under this additional root in explicitly bound lead transcripts (repeatable)")
     a.add_argument("--refresh-template", action="store_true", help="overwrite index.html with the skill template")
     a = sub.add_parser("stage"); a.add_argument("round", type=int); a.add_argument("step", type=int); a.add_argument("label", nargs="?")
     a = sub.add_parser("agent"); a.add_argument("name", choices=AGENTS)
@@ -168,12 +254,16 @@ def main():
     a.add_argument("--model", default=""); a.add_argument("--status", default="ok"); a.add_argument("--note", default="")
     for k in ("input", "output", "cache-read", "cache-write", "total"):
         a.add_argument("--" + k, type=int)
+    a.add_argument("--key", help="stable idempotency key for an archived call")
     a.add_argument("--seconds", type=float)
     a.add_argument("--from-claude-json"); a.add_argument("--from-codex-log"); a.add_argument("--from-agy-json")
+    a.add_argument("--from-codex-session", help="Codex rollout file or session id (preferred over --from-codex-log)")
+    a.add_argument("--since", help="ISO-8601 UTC time; with --from-codex-session count only usage after it (resumed sessions)")
     a.add_argument("--from-agy-transcript", help="agy brain/<conversation_id> dir or its transcript_full.jsonl")
     a.add_argument("--replace", type=int, metavar="N", help="overwrite the N-th call (1-based, as listed in status.json) instead of appending")
     a = sub.add_parser("job"); a.add_argument("id"); a.add_argument("name"); a.add_argument("state")
-    a.add_argument("--gpus", type=int); a.add_argument("--note", default="")
+    a.add_argument("--node-hours", type=float); a.add_argument("--gpu-hours", type=float)
+    a.add_argument("--gpus", type=int, help="allocated GPUs"); a.add_argument("--used-gpus", type=int, help="observed GPUs in use"); a.add_argument("--note")
     a = sub.add_parser("event"); a.add_argument("text"); a.add_argument("--agent", default="lead", choices=AGENTS)
     sub.add_parser("refresh")
     x = p.parse_args()
@@ -199,6 +289,11 @@ def update(b, x, p):
             if not path.is_file(): p.error("lead transcript must be an existing file")
             paths = s.setdefault("lead_transcripts", [])
             if str(path) not in paths: paths.append(str(path))
+        roots = s.setdefault("lead_roots", [])
+        for root in x.lead_root:
+            root = root.expanduser().resolve()
+            if not root.is_dir(): p.error("lead root must be an existing directory")
+            if str(root) not in roots: roots.append(str(root))
         for kv in x.model:
             role, _, label = kv.partition("=")
             if role not in AGENTS:
@@ -223,20 +318,30 @@ def update(b, x, p):
         ag["since"] = now()
     elif x.cmd == "call":
         c = {"t": now(), "agent": x.agent, "phase": x.phase, "model": x.model, "status": x.status, "note": x.note}
+        if x.key:
+            if any(call.get("key") == x.key for call in s["calls"]):
+                return
+            c["key"] = x.key
+        if x.since is not None and x.from_codex_session is None:
+            p.error("--since requires --from-codex-session")
+        if x.replace is not None and not 1 <= x.replace <= len(s["calls"]):
+            p.error("--replace is outside the call table")
         parsed = {}
         try:
             if x.from_claude_json: parsed = from_claude_json(x.from_claude_json)
+            elif x.from_codex_session is not None: parsed = from_codex_session(x.from_codex_session, x.since)
             elif x.from_codex_log: parsed = from_codex_log(x.from_codex_log)
             elif x.from_agy_json: parsed = from_agy_json(x.from_agy_json)
             elif x.from_agy_transcript: parsed = from_agy_transcript(x.from_agy_transcript)
         except (OSError, ValueError) as e:
-            c["note"] = (c["note"] + f" · 用量解析失败：{e}").strip(" ·")
+            p.error(f"用量解析失败：{e}")
         explicit = {"input": x.input, "output": x.output, "cache_read": x.cache_read,
                     "cache_write": x.cache_write, "total": x.total, "seconds": x.seconds}
         for k, v in {**parsed, **{k: v for k, v in explicit.items() if v is not None}}.items():
             if v is not None:
                 c[k] = v
         if not any(k in c for k in ("input", "output", "total")):
+            if x.replace is not None: p.error("replacement has no valid usage; original record retained")
             c["note"] = (c["note"] + " · token 未记录").strip(" ·")
         if x.replace:
             c["t"] = s["calls"][x.replace - 1].get("t", c["t"])   # keep original call time
@@ -244,11 +349,29 @@ def update(b, x, p):
         else:
             s["calls"].append(c)
     elif x.cmd == "job":
-        s["jobs"] = [j for j in s["jobs"] if j["id"] != x.id]
-        j = {"id": x.id, "name": x.name, "state": x.state, "t": now(), "note": x.note}
-        if x.gpus:
-            j["gpus"] = x.gpus
+        j = next((job for job in s["jobs"] if job["id"] == x.id), None)
+        if j is None:
+            j = {"id": x.id}
+        else:
+            s["jobs"].remove(j)
         s["jobs"].append(j)
+        j.update(name=x.name, state=x.state, t=now())
+        if x.note is not None: j["note"] = x.note
+        for field in ("node_hours", "gpu_hours"):
+            value = getattr(x, field)
+            if value is not None:
+                if not 0 <= value < float("inf"): p.error("resource hours must be finite and nonnegative")
+                j[field] = value
+        for field in ("gpus", "used_gpus"):
+            value = getattr(x, field)
+            if value is not None:
+                if value < 0:
+                    p.error("GPU counts must be nonnegative")
+                j[field] = value
+        if (j.get("used_gpus") is None) != (j.get("gpus") is None):
+            print("用卡待核对：尚缺分配或实用卡数。")
+        if j.get("used_gpus") is not None and j.get("gpus") is not None and j["used_gpus"] != j["gpus"]:
+            print(f"用卡差异：分配 {j['gpus']}，实用 {j['used_gpus']}，请核对派工单。")
     elif x.cmd == "event":
         s["events"].append({"t": now(), "agent": x.agent, "text": x.text})
     b.save(s)

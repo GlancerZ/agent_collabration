@@ -1,6 +1,7 @@
 """单轮串行辅助，无并发规划、执行检查点、独立双审或五步归档。"""
 import argparse
 import json
+import os
 import re
 import shlex
 import shutil
@@ -26,13 +27,26 @@ WORKER = """你负责科研执行与自检。以用户原始任务、授权范�
 每轮结果就绪后，另列「执行者意见」，引用证据解释结果，指出局限或替代解释，并建议下一步。""" + "\n" + MODEL_DESIGN
 
 
-def call(command, prompt, directory):
+def agy_reader(model, prompt, read=True):
+    permissions = {"deny": ["command(*)", "write_file(*)", "mcp(*)", "execute_url(*)", "read_url(*)",
+                            *([] if read else ["read_file(*)"])]}
+    return ["agy", "--disable-slash-commands", "--settings", json.dumps({"permissions": permissions}),
+            "--model", model, "-p", prompt]
+
+
+def call(command, prompt, directory, env=None):
     result = subprocess.run(command, input=prompt, text=True, cwd=directory,
-                            stdout=subprocess.PIPE, check=True)
+                            env=env, stdout=subprocess.PIPE, check=True)
     answer = result.stdout.strip()
     if not answer:
         raise ValueError(f"{command[0]} returned an empty response")
     return answer
+
+
+def codex_worker_env(workspace):
+    cache = Path(workspace) / ".cache"
+    return {**os.environ, "UV_CACHE_DIR": str(cache / "uv"), "MPLCONFIGDIR": str(cache / "matplotlib"),
+            "NUMBA_CACHE_DIR": str(cache / "numba"), "XDG_CACHE_HOME": str(cache / "xdg")}
 
 
 def ssh_command(host, socket):
@@ -170,7 +184,8 @@ def main():
         project = out
         remote_dir = shlex.quote(str(args.remote_project))
         remote = ssh_command(args.ssh_host, args.control_socket)
-        subprocess.run(remote + [f"cd {remote_dir} && test -w . && codex --version"], check=True)
+        subprocess.run(remote + [f"cd {remote_dir} && test -w . && codex --version"],
+                       stdin=subprocess.DEVNULL, check=True)
         save("execution-target.txt", f"{args.ssh_host}:{args.remote_project}")
     elif args.ssh_host:
         project = collect_evidence(args.ssh_host, args.remote_file, args.control_socket,
@@ -184,12 +199,11 @@ def main():
     with tempfile.TemporaryDirectory() as temp:
         def lead(prompt):
             if args.claude_agy_model:
-                return call(["agy", "--model", args.claude_agy_model, "-p", prompt], "", temp)
+                return call(agy_reader(args.claude_agy_model, prompt), "", temp)
             return call(claude, prompt, temp)
 
         draft = save("01-draft.md", lead(LEAD + "\n独立设计方案。\n" + brief))
-        review_command = ["agy", "--model", args.gemini_model,
-                          "-p", REVIEW + "\n用户任务\n" + brief]
+        review_command = agy_reader(args.gemini_model, REVIEW + "\n用户任务\n" + brief)
         review = save("02-review.md", call(review_command, "", temp))
         def codex_command(sandbox):
             cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", sandbox]
@@ -211,7 +225,9 @@ def main():
         if args.remote_project:
             command = remote + [f"cd {remote_dir} && exec " + shlex.join(command)]
             mode += " 工作目录位于远程服务器。只执行原任务授权的工作，按集群规定提交计算作业，区分已提交与已核实的产物。"
-        evidence = save("04-codex.md", call(command, f"{WORKER}\n{mode}\n用户任务\n{brief}\n方案\n{plan}", project))
+        env = None if args.remote_project else codex_worker_env(project)
+        evidence = save("04-codex.md", call(command, f"{WORKER}\n{mode}\n用户任务\n{brief}\n方案\n{plan}",
+                                             project, env=env))
         final = lead(f"{LEAD}\n根据执行者报告汇总结论，注明哪些证据由执行者核对，"
                      f"说明是否采纳 Codex 的结果解读和建议、证据理由，并保留未解决分歧。\n{context}\n综合方案\n{plan}\n执行者报告\n{evidence}")
         save("05-report.md", final)

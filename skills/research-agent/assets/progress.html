@@ -105,6 +105,7 @@ td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
       <h2>Token 用量（按 agent 累计）</h2>
       <div class="bars" id="bars"></div>
       <div class="legend">
+        <span><i style="background:var(--lead)"></i>未分列合计</span>
         <span><i style="background:var(--c1)"></i>输入（未缓存）</span>
         <span><i style="background:var(--c2)"></i>缓存读</span>
         <span><i style="background:var(--c3)"></i>缓存写</span>
@@ -208,20 +209,20 @@ function render(s){
   for(const c of s.calls){const t=tot[c.agent];if(!t)continue;t.n++;
     if(c.input==null&&c.output==null&&c.total==null){t.unk++;continue}
     t.input+=c.input||0;t.cache_read+=c.cache_read||0;t.cache_write+=c.cache_write||0;t.output+=c.output||0;
-    if(c.total!=null&&c.input==null&&c.output==null)t.input+=c.total;}
+    if(c.total!=null&&c.input==null&&c.output==null)t.totalOnly=(t.totalOnly||0)+c.total;}
   const lu=s.lead_usage||{}; if(lu.requests)tot.lead={input:lu.input||0,cache_read:lu.cache_read||0,cache_write:lu.cache_write||0,output:lu.output||0,unk:0,n:lu.requests||0};
-  const sum=t=>t.input+t.cache_read+t.cache_write+t.output;
+  const sum=t=>t.input+t.cache_read+t.cache_write+t.output+(t.totalOnly||0);
   const max=Math.max(1,...Object.values(tot).map(sum));
   let bh="";
   for(const [k,a] of Object.entries(AG)){
     if(k==="jupiter")continue; const t=tot[k]; const S=sum(t);
     const seg=(v,col)=>v?`<span style="width:${100*v/max}%;background:${col}"></span>`:"";
     bh+=`<div class="bar"><div><b style="color:${css(a.c)}">${a.name}</b><div class="sub">${t.n} 次${k==="lead"?"请求":"调用"}${t.unk?` · ${t.unk} 次未记录`:""}</div></div>
-      <div class="track">${seg(t.input,"var(--c1)")}${seg(t.cache_read,"var(--c2)")}${seg(t.cache_write,"var(--c3)")}${seg(t.output,"var(--c4)")}</div>
+      <div class="track">${seg(t.input,"var(--c1)")}${seg(t.cache_read,"var(--c2)")}${seg(t.cache_write,"var(--c3)")}${seg(t.output,"var(--c4)")}${seg(t.totalOnly,"var(--lead)")}</div>
       <div class="num"><b>${fmt(S)}</b><div class="sub">输出 ${fmt(t.output)}</div></div></div>`;
   }
   document.getElementById("bars").innerHTML=bh;
-  document.getElementById("tokfoot").textContent="主控 = 主持会话全部请求（含缓存），由 progress.py 从会话记录去重统计；Codex CLI 只报告合计；未记录 = 调用时没有取得用量。";
+  document.getElementById("tokfoot").textContent="主控 = 主持会话全部请求（含缓存），由 progress.py 从会话记录去重统计；Codex 会话可分列未缓存输入、缓存读和输出；仅有 stderr 时保留原始合计；未记录 = 调用时没有取得用量。";
 
   // calls
   let ch=`<tr><th>时间</th><th>Agent</th><th>阶段</th><th>型号</th><th class="n">输入</th><th class="n">缓存读</th><th class="n">缓存写</th><th class="n">输出</th><th class="n">合计</th><th>状态</th></tr>`;
@@ -237,11 +238,11 @@ function render(s){
 
   // jobs
   document.getElementById("jobs-title").textContent=(s.cluster_name||"集群")+" 作业";
-  let jh=`<tr><th>作业号</th><th>名称</th><th>状态</th><th>备注</th></tr>`;
-  if(!s.jobs.length)jh+=`<tr><td colspan="4" class="empty">本次任务尚未提交作业</td></tr>`;
+  let jh=`<tr><th>作业号</th><th>名称</th><th>状态</th><th>节点·小时</th><th>分配 GPU·小时</th><th>备注</th></tr>`;
+  if(!s.jobs.length)jh+=`<tr><td colspan="6" class="empty">本次任务尚未提交作业</td></tr>`;
   for(const j of [...s.jobs].reverse()){
     const col=/RUN|PEND/.test(j.state)?css("--run"):/COMPLETED|OK/.test(j.state)?css("--ok"):/FAIL|CANCEL|TIMEOUT/.test(j.state)?css("--fail"):css("--muted");
-    jh+=`<tr><td>${esc(j.id)}</td><td>${esc(j.name)}${j.gpus?`<div class="sub">${j.gpus} GPU</div>`:""}</td><td style="color:${col};font-weight:600">${esc(j.state)}</td><td>${esc(j.note)}</td></tr>`;
+    jh+=`<tr><td>${esc(j.id)}</td><td>${esc(j.name)}${j.gpus!=null?`<div class="sub">${esc(j.gpus)} GPU</div>`:""}</td><td style="color:${col};font-weight:600">${esc(j.state)}</td><td>${j.node_hours==null?"—":esc(j.node_hours)}</td><td>${j.gpu_hours==null?"—":esc(j.gpu_hours)}</td><td>${esc(j.note)}${j.used_gpus!=null?`<div class="sub">${j.gpus==null?"分配待核对":j.gpus!==j.used_gpus?"用卡差异":"用卡已核对"} · 实用 ${esc(j.used_gpus)} GPU</div>`:""}</td></tr>`;
   }
   document.getElementById("jobs").innerHTML=jh;
 
