@@ -4,11 +4,11 @@
 
 ## 顺序
 
-`gate pass` 放行之后、`formal` 之前，用 `probe` 让 Claude Code 在工作目录里按一条真实请求运行被交付的产品，保存完整会话记录。正式运行时，Codex 先审计这些会话，再做改动。
+`gate pass` 放行之后、`formal` 之前，用 `probe` 让 Claude Code 在工作目录里按一条真实请求运行被交付的产品，保存完整会话记录。正式运行时，执行者先审计这些会话，再做改动。
 
 1. `gate pass`：放行版本已绑定（建议用 `--input-dir` 绑定代码目录）。
 2. `probe`：可运行多次，每次换一个新的 `--outdir`。
-3. `formal`：脚本先重新核对放行哈希，再把每次检验的记录附进提示词，要求 Codex 在改动前审计各检验会话，引用证据说明是否读取禁读路径、决策理由能否在产物中回查、是否改动代码；缺少直接证据时标明无法核实。
+3. `formal`：脚本先重新核对放行哈希，再把每次检验的记录附进提示词，要求执行者在改动前审计各检验会话，引用证据说明是否读取禁读路径、决策理由能否在产物中回查、是否改动代码；缺少直接证据时标明无法核实。
 
 正式调用意图或回执已存在后不能再 probe。有未对账的 probe 时，`formal` 和 `revise` 都会拒绝。
 
@@ -28,7 +28,7 @@ python3 scripts/workflow.py 项目目录 轮次 尝试号 probe --request 请求
 | `--allow` | 可选。逗号分隔的 Claude 工具权限，传给 `--allowedTools`。 |
 | `--deny-read` | 可选，可接多个路径，传给 `--disallowedTools`。Claude Code 把 `Read(/路径)` 当作相对项目根目录，所以绝对路径传成 `Read(//绝对路径)`，相对路径原样传成 `Read(路径)`。 |
 
-脚本在工作目录中运行 `claude -p --model … --strict-mcp-config --output-format stream-json --verbose`，请求和会话记录写到 `工作目录/outdir/request.txt` 与 `transcript.jsonl`，同时在 `主控/尝试-NN/probe/<标记>/` 留一份 `transcript.jsonl` 和 `stderr.log`，用量登记到进度页的 claude 节点。派工带 `--ssh` 时在远程工作目录运行。产品退出码非零、会话记录里没有结果事件或结果报错，即判失败，查看上述两份文件。
+脚本在工作目录中运行 `claude -p --model … --strict-mcp-config --output-format stream-json --verbose`，请求和会话记录写到 `工作目录/outdir/request.txt` 与 `transcript.jsonl`，同时在 `主控/尝试-NN/probe/<标记>/` 留一份 `transcript.jsonl` 和 `stderr.log`，用量登记到进度页的 probe 卡片。派工带 `--ssh` 时在远程工作目录运行。产品退出码非零、会话记录里没有结果事件或结果报错，即判失败，查看上述两份文件。
 
 ## 注意
 

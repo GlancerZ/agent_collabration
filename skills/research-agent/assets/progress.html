@@ -8,16 +8,19 @@
 :root{
   --bg:#f6f5f1; --panel:#ffffff; --ink:#1d1c1a; --muted:#6b6862; --line:#e3e0d8;
   --lead:#c2410c; --claude:#b45309; --gemini:#2563eb; --codex:#0f766e; --jupiter:#7c3aed;
+  --p1:#be185d; --p2:#4d7c0f; --p3:#0369a1; --p4:#a21caf; --p5:#a16207; --p6:#57534e;
   --ok:#15803d; --run:#d97706; --fail:#b91c1c; --idle:#a8a49b; --glow:rgba(217,119,6,.28);
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --bg:#141412; --panel:#1d1c1a; --ink:#ecebe6; --muted:#a09d95; --line:#33312d;
   --lead:#fb923c; --claude:#fbbf24; --gemini:#60a5fa; --codex:#2dd4bf; --jupiter:#a78bfa;
+  --p1:#f472b6; --p2:#a3e635; --p3:#7dd3fc; --p4:#e879f9; --p5:#facc15; --p6:#d6d3d1;
   --ok:#4ade80; --run:#fbbf24; --fail:#f87171; --idle:#5d5a54; --glow:rgba(251,191,36,.22);
 }}
 :root[data-theme="dark"]{
   --bg:#141412; --panel:#1d1c1a; --ink:#ecebe6; --muted:#a09d95; --line:#33312d;
   --lead:#fb923c; --claude:#fbbf24; --gemini:#60a5fa; --codex:#2dd4bf; --jupiter:#a78bfa;
+  --p1:#f472b6; --p2:#a3e635; --p3:#7dd3fc; --p4:#e879f9; --p5:#facc15; --p6:#d6d3d1;
   --ok:#4ade80; --run:#fbbf24; --fail:#f87171; --idle:#5d5a54; --glow:rgba(251,191,36,.22);
 }
 *{box-sizing:border-box}
@@ -132,23 +135,27 @@ td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
   </div>
 </main>
 <script>
-const AG = {
-  lead:   {name:"主控 Claude", sub:"", c:"--lead",   x:250, y:20},
-  claude: {name:"Claude",      sub:"", c:"--claude", x:20,  y:200},
-  gemini: {name:"Gemini",      sub:"", c:"--gemini", x:180, y:200},
-  codex:  {name:"Codex",       sub:"", c:"--codex", x:340, y:200},
-  jupiter:{name:"集群",         sub:"", c:"--jupiter",x:500, y:200},
-};
-const W=140,H=64, STATE_TXT={idle:"空闲",running:"调用中",done:"已完成",failed:"失败",waiting:"等待"};
+// lead = chair card, jupiter = cluster card; boards without s.team show the legacy trio
+const NAMES={lead:"主控 Claude", claude:"Claude", gemini:"Gemini", codex:"Codex", jupiter:"集群"};
+const LEGACY=["claude","gemini","codex"], PALETTE=["--p1","--p2","--p3","--p4","--p5","--p6"];
+const W=140,H=64,PER=4,ROW_Y=200,ROW_H=150, STATE_TXT={idle:"空闲",running:"调用中",done:"已完成",failed:"失败",waiting:"等待"};
 const fmt=n=>n==null?"—":n>=1e6?(n/1e6).toFixed(2)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":String(n);
 const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const modelLabel=id=>({"claude-opus-5-5":"Claude Opus 5.5","claude-fable-5-2":"Claude Fable 5.2"}[id]||id);
 const hm=t=>{try{const d=new Date(t);return d.toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"})}catch(e){return t}};
+const fit=(t,em)=>{t=String(t??"");let w=0;for(let i=0;i<t.length;i++)if((w+=t.charCodeAt(i)>255?1:.58)>em)return t.slice(0,i)+"…";return t};
 
 function render(s){
-  for(const [k,m] of Object.entries(s.models||{})) if(AG[k]) AG[k].sub=m;
-  if(s.cluster_name) AG.jupiter.name=s.cluster_name;
+  // agent row: team (or legacy trio), then anyone else active or with calls, then an explicit worker
+  const called=new Set(s.calls.map(c=>c.agent)), worker=s.worker||"codex", row=[...(s.team||LEGACY)];
+  for(const [k,a] of Object.entries(s.agents))
+    if(k!=="lead"&&k!=="jupiter"&&!row.includes(k)&&(a.state!=="idle"||called.has(k)))row.push(k);
+  if(s.worker&&!row.includes(s.worker))row.push(s.worker);
+  const pal={}; let np=0;
+  const color=k=>NAMES[k]?"--"+k:(pal[k]??=PALETTE[np++%PALETTE.length]);
+  const name=k=>k==="jupiter"?s.cluster_name||NAMES.jupiter:(s.labels||{})[k]||NAMES[k]||k;
+  row.forEach(color);
   document.documentElement.style.setProperty("--c1",css("--idle"));
   document.documentElement.style.setProperty("--c2","color-mix(in srgb, var(--gemini) 35%, transparent)");
   document.documentElement.style.setProperty("--c3","color-mix(in srgb, var(--jupiter) 55%, transparent)");
@@ -173,51 +180,63 @@ function render(s){
   }
   document.getElementById("rounds").innerHTML=rh;
 
-  // graph
+  // graph: lead on top; agents in rows of up to PER cards, the cluster card right after the worker;
+  // lower rows are offset half a card so their edges drop through the gaps of the first row
+  const slots=[...row], wi=row.indexOf(worker);
+  slots.splice(wi<0?row.length:wi+1,0,"jupiter");
+  const nr=Math.ceil(slots.length/PER), sizes=[];
+  for(let r=0,left=slots.length;r<nr;r++){const m=Math.ceil(left/(nr-r));sizes.push(m);left-=m}
+  for(let r=0,end=0;wi>=0&&r<nr-1;r++){end+=sizes[r];             // keep worker and cluster on one row
+    if(end===wi+1){const d=sizes[r]<PER?1:-1;sizes[r]+=d;sizes[r+1]-=d;break}}
+  const pos={lead:[250,20]}; let at=0;
+  sizes.forEach((m,r)=>{const x0=340-m*80+(r&&(sizes[0]-m)%2===0?80:0);
+    for(let j=0;j<m;j++)pos[slots[at++]]=[x0+j*160,ROW_Y+r*ROW_H]});
+  const xs=Object.values(pos).map(p=>p[0]), vx=Math.min(0,Math.min(...xs)-20), vr=Math.max(...xs)+W;
+  document.getElementById("graph").setAttribute("viewBox",`${vx} 0 ${(vr>640?vr+20:640)-vx} ${330+(sizes.length-1)*ROW_H}`);
   let g="";
-  const center=a=>[AG[a].x+W/2,AG[a].y+H/2];
   const edge=(a,b)=>{
     const on=s.agents[a]?.state==="running"&&s.agents[b]?.state==="running";
-    const [x1,y1]=[AG[a].x+W/2,AG[a].y+H]; const [x2,y2]=b==="jupiter"&&a==="codex"?[AG[b].x,AG[b].y+H/2]:[AG[b].x+W/2,AG[b].y];
-    const sx=a==="codex"&&b==="jupiter"?AG[a].x+W:x1, sy=a==="codex"&&b==="jupiter"?AG[a].y+H/2:y1;
-    const d=a==="codex"&&b==="jupiter"?`M${sx},${sy} L${x2},${y2}`:`M${sx},${sy} C${sx},${sy+60} ${x2},${y2-60} ${x2},${y2}`;
-    const c=css(AG[b].c);
-    return `<path class="edge ${on?"on":""}" style="--c:${c}" d="${d}"/>`;
+    const [ax,ay]=pos[a], [bx,by]=pos[b], x1=ax+W/2, y1=ay+H, x2=bx+W/2;
+    const d=b==="jupiter"?`M${ax+W},${ay+H/2} L${bx},${by+H/2}`
+      :`M${x1},${y1} C${x1},${y1+60} ${x2},${ROW_Y-60} ${x2},${ROW_Y}`+(by>ROW_Y?` L${x2},${by}`:"");
+    return `<path class="edge ${on?"on":""}" style="--c:${css(color(b))}" d="${d}"/>`;
   };
-  ["claude","gemini","codex"].forEach(b=>g+=edge("lead",b));
-  g+=edge("codex","jupiter");
-  for(const [k,a] of Object.entries(AG)){
-    const st=s.agents[k]||{state:"idle"}; const c=css(a.c);
+  row.forEach(b=>g+=edge("lead",b));
+  if(wi>=0)g+=edge(worker,"jupiter");
+  for(const k of ["lead",...slots]){
+    const [x,y]=pos[k], st=s.agents[k]||{state:"idle"}, c=css(color(k)), nm=name(k), sub=(s.models||{})[k]||"";
     const sc={running:css("--run"),done:css("--ok"),failed:css("--fail"),waiting:c}[st.state]||css("--muted");
-    g+=`<g class="node ${st.state}" style="--c:${c}">
-      <rect class="halo" x="${a.x}" y="${a.y}" width="${W}" height="${H}" rx="10"/>
-      <rect x="${a.x}" y="${a.y}" width="${W}" height="${H}" rx="10"/>
-      <rect x="${a.x}" y="${a.y}" width="5" height="${H}" rx="2" style="fill:${c};stroke:none;filter:none"/>
-      <text x="${a.x+14}" y="${a.y+22}">${a.name}</text>
-      <text class="meta" x="${a.x+14}" y="${a.y+38}">${a.sub}</text>
-      <text class="state" x="${a.x+14}" y="${a.y+54}" style="fill:${sc}">${st.state==="running"?"● ":""}${STATE_TXT[st.state]||st.state}</text>
+    g+=`<g class="node ${st.state}" style="--c:${c}"><title>${esc([nm,sub].filter(Boolean).join(" · "))}</title>
+      <rect class="halo" x="${x}" y="${y}" width="${W}" height="${H}" rx="10"/>
+      <rect x="${x}" y="${y}" width="${W}" height="${H}" rx="10"/>
+      <rect x="${x}" y="${y}" width="5" height="${H}" rx="2" style="fill:${c};stroke:none;filter:none"/>
+      <text x="${x+14}" y="${y+22}">${esc(fit(nm,9))}</text>
+      <text class="meta" x="${x+14}" y="${y+38}">${esc(fit(sub,11.5))}</text>
+      <text class="state" x="${x+14}" y="${y+54}" style="fill:${sc}">${st.state==="running"?"● ":""}${STATE_TXT[st.state]||st.state}</text>
     </g>`;
     if(st.task){
-      const ty=k==="lead"?a.y+H+16:a.y+H+16; const lines=wrap(st.task,13).slice(0,4);
-      lines.forEach((ln,i)=>g+=`<text class="task" x="${a.x+4}" y="${ty+i*14}">${esc(ln)}</text>`);
+      const ty=y+H+16; const lines=wrap(st.task,13).slice(0,4);
+      lines.forEach((ln,i)=>g+=`<text class="task" x="${x+4}" y="${ty+i*14}">${esc(ln)}</text>`);
     }
   }
   document.getElementById("graph").innerHTML=g;
 
-  // token totals
-  const tot={}; for(const k of Object.keys(AG))tot[k]={input:0,cache_read:0,cache_write:0,output:0,unk:0,n:0};
-  for(const c of s.calls){const t=tot[c.agent];if(!t)continue;t.n++;
+  // token totals: lead, then agents with calls in card order (boards without a team keep the trio)
+  const tot={}, T=k=>tot[k]??={input:0,cache_read:0,cache_write:0,output:0,unk:0,n:0};
+  for(const c of s.calls){const t=T(c.agent);t.n++;
     if(c.input==null&&c.output==null&&c.total==null){t.unk++;continue}
     t.input+=c.input||0;t.cache_read+=c.cache_read||0;t.cache_write+=c.cache_write||0;t.output+=c.output||0;
     if(c.total!=null&&c.input==null&&c.output==null)t.totalOnly=(t.totalOnly||0)+c.total;}
   const lu=s.lead_usage||{}; if(lu.requests)tot.lead={input:lu.input||0,cache_read:lu.cache_read||0,cache_write:lu.cache_write||0,output:lu.output||0,unk:0,n:lu.requests||0};
+  const bars=["lead",...row.filter(k=>called.has(k)||!s.team&&LEGACY.includes(k)),
+    ...[...called].filter(k=>k!=="lead"&&k!=="jupiter"&&!row.includes(k))];
   const sum=t=>t.input+t.cache_read+t.cache_write+t.output+(t.totalOnly||0);
-  const max=Math.max(1,...Object.values(tot).map(sum));
+  const max=Math.max(1,...bars.map(k=>sum(T(k))));
   let bh="";
-  for(const [k,a] of Object.entries(AG)){
-    if(k==="jupiter")continue; const t=tot[k]; const S=sum(t);
+  for(const k of bars){
+    const t=T(k); const S=sum(t);
     const seg=(v,col)=>v?`<span style="width:${100*v/max}%;background:${col}"></span>`:"";
-    bh+=`<div class="bar"><div><b style="color:${css(a.c)}">${a.name}</b><div class="sub">${t.n} 次${k==="lead"?"请求":"调用"}${t.unk?` · ${t.unk} 次未记录`:""}</div></div>
+    bh+=`<div class="bar"><div><b style="color:${css(color(k))}">${esc(name(k))}</b><div class="sub">${t.n} 次${k==="lead"?"请求":"调用"}${t.unk?` · ${t.unk} 次未记录`:""}</div></div>
       <div class="track">${seg(t.input,"var(--c1)")}${seg(t.cache_read,"var(--c2)")}${seg(t.cache_write,"var(--c3)")}${seg(t.output,"var(--c4)")}${seg(t.totalOnly,"var(--lead)")}</div>
       <div class="num"><b>${fmt(S)}</b><div class="sub">输出 ${fmt(t.output)}</div></div></div>`;
   }
@@ -228,9 +247,9 @@ function render(s){
   let ch=`<tr><th>时间</th><th>Agent</th><th>阶段</th><th>型号</th><th class="n">输入</th><th class="n">缓存读</th><th class="n">缓存写</th><th class="n">输出</th><th class="n">合计</th><th>状态</th></tr>`;
   if(!s.calls.length)ch+=`<tr><td colspan="10" class="empty">暂无</td></tr>`;
   for(const c of [...s.calls].reverse()){
-    const a=AG[c.agent]; const total=c.total??((c.input||0)+(c.cache_read||0)+(c.cache_write||0)+(c.output||0)||null);
+    const total=c.total??((c.input||0)+(c.cache_read||0)+(c.cache_write||0)+(c.output||0)||null);
     const col={ok:css("--ok"),failed:css("--fail"),running:css("--run")}[c.status]||css("--muted");
-    ch+=`<tr><td>${hm(c.t)}</td><td><span class="tag" style="background:${css(a.c)}">${a.name}</span></td><td>${esc(c.phase)}${c.note?`<div class="sub">${esc(c.note)}</div>`:""}</td><td title="${esc(c.model)}">${esc(modelLabel(c.model))}</td>
+    ch+=`<tr><td>${hm(c.t)}</td><td><span class="tag" style="background:${css(color(c.agent))}">${esc(name(c.agent))}</span></td><td>${esc(c.phase)}${c.note?`<div class="sub">${esc(c.note)}</div>`:""}</td><td title="${esc(c.model)}">${esc(modelLabel(c.model))}</td>
       <td class="n">${fmt(c.input)}</td><td class="n">${fmt(c.cache_read)}</td><td class="n">${fmt(c.cache_write)}</td><td class="n">${fmt(c.output)}</td><td class="n"><b>${fmt(total)}</b></td>
       <td style="color:${col}">${esc(c.status)}</td></tr>`;
   }
@@ -248,7 +267,7 @@ function render(s){
 
   // events
   const ev=[...s.events].reverse().slice(0,40);
-  document.getElementById("events").innerHTML=ev.length?ev.map(e=>`<div class="ev"><time>${hm(e.t)}</time><span style="color:${css(AG[e.agent]?.c||"--muted")};font-weight:600;white-space:nowrap">${AG[e.agent]?.name||""}</span><span>${esc(e.text)}</span></div>`).join(""):`<div class="empty">暂无</div>`;
+  document.getElementById("events").innerHTML=ev.length?ev.map(e=>`<div class="ev"><time>${hm(e.t)}</time><span style="color:${css(e.agent?color(e.agent):"--muted")};font-weight:600;white-space:nowrap">${e.agent?esc(name(e.agent)):""}</span><span>${esc(e.text)}</span></div>`).join(""):`<div class="empty">暂无</div>`;
 }
 function wrap(t,n){const out=[];let s=String(t);while(s.length>n){out.push(s.slice(0,n));s=s.slice(n)}if(s)out.push(s);return out}
 

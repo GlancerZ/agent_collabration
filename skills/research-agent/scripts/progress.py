@@ -8,6 +8,7 @@ The chair updates state with this script at every hand-off.
   progress.py 项目 init --title 名称 --limits "≤8 GPU · 2 轮" --max-rounds 2 \
       --model lead="Opus 5.5 · xhigh" --model claude="Fable 5.2 · xhigh" \
       --model gemini="4 Neon · XHigh" --model codex="gpt-6.2-astra · max" --cluster JUPITER
+  progress.py 项目 init --agent opus="Claude Opus" --agent gemini=Gemini --agent codex=Codex --worker codex
   progress.py 项目 init --lead-transcript 会话.jsonl --lead-root 主控工作目录
   progress.py 项目 stage 1 3 ["Codex 执行 · 尝试-01 试跑"]
   progress.py 项目 agent codex running "尝试-01 实现与试跑"      # idle|running|waiting|done|failed
@@ -20,19 +21,46 @@ The chair updates state with this script at every hand-off.
   progress.py 项目 job 3120310 v19a-eval RUNNING --gpus 8 --note "..."
   progress.py 项目 event "三份首稿封存" [--agent lead]
   progress.py 项目 refresh                                           # recount lead usage only
+
+Agent keys match [a-z][a-z0-9_-]{0,23}: lead is the chair card, jupiter the cluster card, and
+any other key is an agent card (created on first use by agent/call). --agent (repeatable,
+ordered) sets the team row and display names; boards without one show Claude, Gemini, Codex.
+--worker names the agent drawn as submitting to the cluster (default codex).
 """
 import fcntl, tempfile
 import argparse, datetime as dt, json, os, re, shutil
 from pathlib import Path
 
-AGENTS = ["lead", "claude", "gemini", "codex", "jupiter"]
-STEPS = ["独立规划", "Claude 汇总派工", "Codex 执行（试跑→检查点→正式）", "三方并行核验", "Claude 总验收与转向"]
+AGENTS = ["lead", "claude", "gemini", "codex", "jupiter"]  # cards on a new board; any valid key may join
+STEPS = ["独立规划", "主控汇总派工", "执行（试跑→检查点→正式）", "并行独立核验", "主控总验收与转向"]
 TEMPLATE = Path(__file__).resolve().parent.parent / "assets" / "progress.html"
 CODEX_UUID = r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}"
+KEY = re.compile(r"[a-z][a-z0-9_-]{0,23}")
 
 
 def now():
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def agent_key(value):
+    if not KEY.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            f"invalid agent key {value!r} (a-z first, then a-z 0-9 _ -, at most 24 characters)")
+    return value
+
+
+def member_key(value):
+    if agent_key(value) in ("lead", "jupiter"):
+        raise argparse.ArgumentTypeError(f"{value} is the chair or cluster card, not a team agent")
+    return value
+
+
+def keyed(check):
+    """KEY=LABEL with the key checked by `check`; returns (key, label)."""
+    def parse(value):
+        key, _, label = value.partition("=")
+        return check(key), label
+    return parse
 
 
 def atomic_text(path, text):
@@ -232,8 +260,10 @@ class Board:
         s["updated"] = now()
         atomic_text(self.state, json.dumps(s, ensure_ascii=False, indent=1))
         atomic_text(self.dir / "status.js", "window.PIPELINE_STATUS = " + json.dumps(s, ensure_ascii=False) + ";\n")
-        if not (self.dir / "index.html").exists():
-            shutil.copy(TEMPLATE, self.dir / "index.html")
+        page = self.dir / "index.html"
+        # The page is generated: keep it on the shipped template so new board keys never meet an old script.
+        if not page.exists() or page.read_bytes() != TEMPLATE.read_bytes():
+            shutil.copy(TEMPLATE, page)
 
 
 def main():
@@ -242,15 +272,19 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("init")
     a.add_argument("--title"); a.add_argument("--limits"); a.add_argument("--max-rounds", type=int)
-    a.add_argument("--model", action="append", default=[], help="role=label, role in " + ",".join(AGENTS))
+    a.add_argument("--model", action="append", default=[], type=keyed(agent_key), metavar="KEY=LABEL",
+                   help="model label shown under an agent card (lead, jupiter or any agent key)")
+    a.add_argument("--agent", dest="team", action="append", default=[], type=keyed(member_key), metavar="KEY=NAME",
+                   help="team agent and display name, in card order (repeatable; replaces the previous team)")
+    a.add_argument("--worker", type=member_key, help="agent drawn as submitting to the cluster (default codex)")
     a.add_argument("--cluster"); a.add_argument("--lead-transcript")
     a.add_argument("--lead-root", type=Path, action="append", default=[],
                    help="include cwd under this additional root in explicitly bound lead transcripts (repeatable)")
     a.add_argument("--refresh-template", action="store_true", help="overwrite index.html with the skill template")
     a = sub.add_parser("stage"); a.add_argument("round", type=int); a.add_argument("step", type=int); a.add_argument("label", nargs="?")
-    a = sub.add_parser("agent"); a.add_argument("name", choices=AGENTS)
+    a = sub.add_parser("agent"); a.add_argument("name", type=agent_key)
     a.add_argument("state", choices=["idle", "running", "waiting", "done", "failed"]); a.add_argument("task", nargs="?")
-    a = sub.add_parser("call"); a.add_argument("agent", choices=AGENTS); a.add_argument("phase")
+    a = sub.add_parser("call"); a.add_argument("agent", type=agent_key); a.add_argument("phase")
     a.add_argument("--model", default=""); a.add_argument("--status", default="ok"); a.add_argument("--note", default="")
     for k in ("input", "output", "cache-read", "cache-write", "total"):
         a.add_argument("--" + k, type=int)
@@ -264,7 +298,7 @@ def main():
     a = sub.add_parser("job"); a.add_argument("id"); a.add_argument("name"); a.add_argument("state")
     a.add_argument("--node-hours", type=float); a.add_argument("--gpu-hours", type=float)
     a.add_argument("--gpus", type=int, help="allocated GPUs"); a.add_argument("--used-gpus", type=int, help="observed GPUs in use"); a.add_argument("--note")
-    a = sub.add_parser("event"); a.add_argument("text"); a.add_argument("--agent", default="lead", choices=AGENTS)
+    a = sub.add_parser("event"); a.add_argument("text"); a.add_argument("--agent", default="lead", type=agent_key)
     sub.add_parser("refresh")
     x = p.parse_args()
 
@@ -294,24 +328,33 @@ def update(b, x, p):
             root = root.expanduser().resolve()
             if not root.is_dir(): p.error("lead root must be an existing directory")
             if str(root) not in roots: roots.append(str(root))
-        for kv in x.model:
-            role, _, label = kv.partition("=")
-            if role not in AGENTS:
-                p.error(f"unknown role {role}")
+        for role, label in x.model:
             s.setdefault("models", {})[role] = label
+        if x.team:
+            keys = [key for key, _ in x.team]
+            if len(set(keys)) < len(keys): p.error("duplicate --agent key")
+            labels = s.setdefault("labels", {})
+            for key, label in x.team:
+                if label: labels[key] = label
+                else: labels.pop(key, None)  # bare KEY falls back to the default name
+                s["agents"].setdefault(key, {"state": "idle", "task": ""})
+            s["team"] = keys
+            s["steps"] = STEPS  # Step names written for the fixed trio would now be wrong.
+        if x.worker: s["worker"] = x.worker
         if x.refresh_template:
             b.dir.mkdir(parents=True, exist_ok=True)
             shutil.copy(TEMPLATE, b.dir / "index.html")
         print("lead transcript:", s.get("lead_transcripts") or "(none)")
         print("page:", b.dir / "index.html")
     elif x.cmd == "stage":
-        if x.round < 1 or (s.get("max_rounds") and x.round > s["max_rounds"]) or not 1 <= x.step <= len(STEPS):
+        steps = s.get("steps") or STEPS  # older boards keep the step names they were created with
+        if x.round < 1 or (s.get("max_rounds") and x.round > s["max_rounds"]) or not 1 <= x.step <= len(steps):
             p.error("round or step outside project limits")
         s["round"], s["step"] = x.round, x.step
-        s["step_label"] = x.label or STEPS[x.step - 1]
+        s["step_label"] = x.label or steps[x.step - 1]
         s["events"].append({"t": now(), "agent": "lead", "text": f"第 {x.round} 轮 · 第 {x.step} 步：{s['step_label']}"})
     elif x.cmd == "agent":
-        ag = s["agents"].setdefault(x.name, {})
+        ag = s["agents"].setdefault(x.name, {"state": "idle", "task": ""})
         ag["state"] = x.state
         if x.task is not None:
             ag["task"] = x.task
@@ -348,6 +391,7 @@ def update(b, x, p):
             s["calls"][x.replace - 1] = c
         else:
             s["calls"].append(c)
+        s["agents"].setdefault(x.agent, {"state": "idle", "task": ""})
     elif x.cmd == "job":
         j = next((job for job in s["jobs"] if job["id"] == x.id), None)
         if j is None:

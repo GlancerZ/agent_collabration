@@ -6,6 +6,7 @@ import os
 import hashlib
 import json
 from pathlib import Path
+import re
 import tempfile
 
 
@@ -23,6 +24,14 @@ def approved(chair, hashes):
         return False
     record = json.loads(path.read_text())
     return record.get("status") == "通过" and record.get("inputs") == hashes
+
+
+def role_name(value):
+    """主控 or an agent name as workflow.py validates it; it becomes an archive folder."""
+    value = value.strip()
+    if value != "主控" and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,23}", value):
+        raise argparse.ArgumentTypeError(f"invalid role name: {value!r}")
+    return value
 
 
 def sealed_draft_path(chair, tag):
@@ -132,7 +141,10 @@ def main():
     parser.add_argument("--decision", choices=["通过", "返工", "证据不足"])
     parser.add_argument("--reason")
     parser.add_argument("--step", type=int, choices=range(1,6))
-    parser.add_argument("--role", choices=["Claude","Gemini","Codex","主控"])
+    parser.add_argument("--role", type=role_name, help="主控 or an agent name from the routes")
+    parser.add_argument("--worker", type=role_name, default="Codex", help="agent whose folder holds 事实材料")
+    parser.add_argument("--agents", default="Claude,Gemini,Codex",
+                        help="init: comma-separated agent folders to create")
     parser.add_argument("--phase", choices=["pilot","formal"])
     parser.add_argument("--tag")
     parser.add_argument("--input", type=Path, action="append")
@@ -149,13 +161,13 @@ def main():
     if args.action in ("intent","receipt","resume"):
         recovery(args, chair, parser)
         return
-    worker = base / "Codex" / attempt
+    worker = base / args.worker / attempt
     facts = worker / "事实材料"
     decision = chair / "核对.json"
     target = base / "验收证据" / attempt
     status = args.action
     if args.action == "init":
-        for role in ("Claude", "Gemini", "Codex", "主控"):
+        for role in dict.fromkeys((*map(role_name, args.agents.split(",")), args.worker, "主控")):
             (base / role / attempt).mkdir(parents=True, exist_ok=True)
         facts.mkdir(exist_ok=True)
         for path in (worker / "自检.md", worker / "执行者意见.md"):

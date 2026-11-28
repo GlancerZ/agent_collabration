@@ -51,7 +51,7 @@
 
 1. 只核对本次试跑的作业号、运行位置、配置和实际用卡，核对分配卡数是否等于实际用卡数，用进度工具 `job` 的 `--gpus`、`--used-gpus` 分别登记分配与实测值。恢复时读取同一作业的记录，出现用卡差异由主控核对原因，按派工单说明空闲卡；正式作业号在放行并成功提交后登记。
 2. 是否有卡闲置：每个任务的起止时间、绑定的是哪张卡，最好有 `nvidia-smi` 采样，也可以看 `sacct -o AllocTRES,TRESUsageInTot`。
-3. 有没有退到 CPU，有没有在登录节点上计算：在登录节点上跑 `ps -u $USER`，查看 Codex 回执里列出的运行位置。
+3. 有没有退到 CPU，有没有在登录节点上计算：在登录节点上跑 `ps -u $USER`，查看执行者回执里列出的运行位置。
 4. 时限和排队策略是否合理：试跑是否走了快速通道，时限是否估得过宽。
 
 ## 连接集群
@@ -62,4 +62,4 @@
 
 之后所有 SSH 命令都加 `-o ControlPath=~/.ssh/cm-<别名> -o BatchMode=yes`。连接一旦失败就停下来报告，不尝试其他认证方式。
 
-**在本机跑 Codex、通过 SSH 操作集群。** Codex 要有网络才能使用已建立的 ControlMaster 连接：手动调用加 `--sandbox workspace-write -c sandbox_workspace_write.network_access=true`；用 workflow.py 时派工加 `dispatch --network`（只对本机 worker 生效），并加 `--scheduler-ssh <别名>`，让 `watch` 经该别名在集群上运行 `sacct`（不加时 `watch` 用 `--ssh`，两者都没有就在本机查，本机通常没有 `sacct`）。派工前先让 Codex 运行一次 `ssh … hostname; command -v sbatch` 确认。
+**在本机跑执行者、通过 SSH 操作集群。** codex 客户端的执行者要有网络才能使用已建立的 ControlMaster 连接：手动调用加 `--sandbox workspace-write -c sandbox_workspace_write.network_access=true`；用 workflow.py 时派工加 `dispatch --network`（只对本机 codex 执行者生效；claude、agy 执行者没有这层沙箱，不需要也不受它控制），并加 `--scheduler-ssh <别名>`，让 `watch` 经该别名在集群上运行 `sacct`（不加时 `watch` 用 `--ssh`，两者都没有就在本机查，本机通常没有 `sacct`）。派工前先让执行者运行一次 `ssh … hostname; command -v sbatch` 确认。

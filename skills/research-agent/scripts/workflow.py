@@ -23,9 +23,14 @@ from product_probe import resolve_outdir
 from research import agy_reader, codex_worker_env, ssh_command
 
 HERE = Path(__file__).resolve().parent
-ROLES = ("Claude", "Gemini", "Codex")
+ROLES = ("Claude", "Gemini", "Codex")  # Default standard-tier planners and reviewers.
+DEFAULT_WORKER = "Codex"
 ADJUDICATOR = "Adjudicator"
-CALL_ROLES = (*ROLES, ADJUDICATOR, "Probe")
+PROBE = "Probe"
+CLIENTS = ("claude", "agy", "codex")
+AGENT_NAME = r"[A-Za-z][A-Za-z0-9_-]{0,23}"  # Used in archive paths and board keys.
+RESERVED = {"adjudicator", "probe", "lead", "jupiter"}
+WORKER_TOOLS = "Bash,Read,Edit,Write,Glob,Grep"
 PLAN_MAX_CHARS = 1500
 REVIEW_MAX_CHARS = 1200
 WORKER_MAX_CHARS = 1500
@@ -51,11 +56,9 @@ WAITING = ("RUNNING", "PENDING", "CONFIGURING", "COMPLETING")
 TERMINAL = ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED",
             "DEADLINE", "BOOT_FAIL", "REVOKED", "SPECIAL_EXIT")
 SSH_ALIAS = r"[A-Za-z0-9][A-Za-z0-9_.@-]*"
+SSH_COMMAND_MAX = 120_000
+LABEL_MAX = 40  # Card label under the agent name on the progress page.
 FOLLOWUP_STEPS = {("plan", "dispatch"), ("gate", "formal"), ("review", "decide")}
-NEXT = {"plan": "三方独立规划", "dispatch": "Opus 读取三份规划并派工", "pilot": "Codex 执行派工单中的试跑",
-        "gate": "Opus 核对试跑并记录放行决定", "formal": "Codex 执行已放行的正式任务",
-        "review": "冻结交付，三方独立书面评审", "decide": "Opus 读取三份报告并裁决",
-        "next": "下一轮从独立规划开始", "done": "已交付", "hold": "已暂停", "revise": "新尝试，从试跑开始"}
 
 
 def read(path):
@@ -118,27 +121,79 @@ def frozen_packet(folder, paths):
     return contents(load(manifest))
 
 
-def validate_routes(routes, reviewers):
+def agent_names(value, flag):
+    """Parse a comma-separated team list; names become archive folders and board keys."""
+    if value is None:
+        return None
+    names = [name.strip() for name in value.split(",")]
+    require(all(re.fullmatch(AGENT_NAME, name) for name in names)
+            and len({name.lower() for name in names}) == len(names),
+            f"{flag} requires a comma-separated list of distinct agent names (letters, digits, _ or -)")
+    reserved = [name for name in names if name.lower() in RESERVED or name.lower().startswith("intent-")]
+    require(not reserved, f"{flag}: reserved name {', '.join(reserved)}")
+    return names
+
+
+def team_members(planners, worker, reviewers):
+    return list(dict.fromkeys((*planners, worker, *reviewers)))
+
+
+def validate_routes(routes, team):
     require(isinstance(routes, dict), "routes must be a JSON object")
-    allowed = {"Claude": ("claude", "agy"), "Gemini": ("agy",), "Codex": ("codex",),
-               ADJUDICATOR: ("claude", "agy", "codex")}
-    required = dict.fromkeys((*reviewers, "Codex"))
-    if ADJUDICATOR in routes:
-        required[ADJUDICATOR] = None
+    required = [*team, *([ADJUDICATOR] if ADJUDICATOR in routes else [])]
     for role in required:
         route = routes.get(role)
-        require(isinstance(route, dict) and route.get("client") in allowed[role]
+        require(role in routes, f"routes has no agent {role}; add it to routes or choose the team with "
+                                "--planners, --worker and --reviewers")
+        require(isinstance(route, dict) and route.get("client") in CLIENTS
                 and all(isinstance(route.get(k), str) and route[k].strip() for k in ("model", "effort")),
                 f"missing or invalid confirmed client/model/effort for {role}")
+        label = route.get("label")
+        require(label is None or isinstance(label, str) and 0 < len(label.strip()) <= LABEL_MAX,
+                f"{role}: label must be a non-empty string of at most {LABEL_MAX} characters")
     return routes
+
+
+DISPATCH_SECTIONS = ("目标｜要解决的问题（采纳哪份方案、分歧与取舍）｜要实现的功能｜输入｜默认方法与参数｜"
+                     "验收条件｜试跑范围｜回执格式｜计算资源（不用集群写“无”）")
+
+
+def own_transcript():
+    """This Claude Code session's transcript and working directory, when the chair runs inside one."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not re.fullmatch(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", sid):
+        return None, None
+    home = Path(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser()
+    found = list((home / "projects").glob(f"*/{sid}.jsonl"))
+    if len(found) != 1:
+        return None, None
+    with found[0].open(encoding="utf-8") as stream:
+        for line in islice(stream, 50):
+            with contextlib.suppress(ValueError):
+                cwd = json.loads(line).get("cwd")
+                if cwd and Path(cwd).is_dir():
+                    return found[0], cwd
+    return found[0], None
+
+
+def card_label(route):
+    """Line under an agent's card: the route's own label, else model and effort."""
+    return (route.get("label") or "").strip() or f"{route['model']} · {route['effort']}"
 
 
 def client(route, prompt, worker=False, network=False):
     model, effort = route["model"], route["effort"]
     if route["client"] == "claude":
-        return ["claude", "-p", "--model", model, "--effort", effort, "--tools", "",
-                "--strict-mcp-config", "--no-session-persistence", "--output-format", "json"], prompt
+        tools = ["--permission-mode", "acceptEdits", "--allowedTools", WORKER_TOOLS] if worker else ["--tools", ""]
+        persistence = [] if worker else ["--no-session-persistence"]
+        return ["claude", "-p", "--model", model, "--effort", effort, *tools,
+                "--strict-mcp-config", *persistence, "--output-format", "json"], prompt
     if route["client"] == "agy":
+        if worker:  # Headless agy auto-denies anything not allowed in settings.
+            permissions = {"allow": ["command(*)", "write_file(*)", "read_file(*)"], "deny": ["mcp(*)"]}
+            return ["agy", "--disable-slash-commands", "--effort", effort, "--output-format", "json",
+                    "--mode", "accept-edits", "--settings", json.dumps({"permissions": permissions}),
+                    "--model", model, "-p", prompt], ""
         command = agy_reader(model, prompt, read=False)
         return command[:1] + ["--effort", effort, "--output-format", "json"] + command[1:], ""
     command = ["codex", "exec", "-m", model, "-c", "model_reasoning_effort=" + json.dumps(effort),
@@ -169,9 +224,7 @@ def codex_usage(stderr):
     return codex_log_usage(stderr)
 
 
-def board_agent(role, route):
-    if role in (ADJUDICATOR, "Probe"):
-        return {"claude": "claude", "agy": "gemini", "codex": "codex"}[route["client"]]
+def board_agent(role):
     return role.lower()
 
 
@@ -244,26 +297,118 @@ class Run:
     def board(self, *args):
         tool("progress.py", self.project, *args)
 
+    def run_line(self, *words, round_=None, attempt=None):
+        """Runs from the project directory, so relative paths in a card work as written."""
+        return " ".join(["cd", shlex.quote(str(self.project)), "&&", "python3", shlex.quote(str(HERE / "workflow.py")),
+                         '"$PWD"', str(round_ or self.a.round), str(attempt or self.a.attempt), *words])
+
+    def rel(self, path):
+        return str(path.relative_to(self.project))
+
+    def sized(self, paths):
+        return "；".join(f"{self.rel(p)}（{len(read(p)):,} 字）" if p.is_file() else f"{self.rel(p)}（缺）"
+                        for p in paths)
+
+    def card(self):
+        """Everything the chair needs for the next step, so it reads no script source or reference."""
+        step, chair, light = self.state["next"], self.rel(self.chair), self.tier == "light"
+        own = self.base / self.worker / self.attempt
+        lines = [f"下一步｜{self.next_action(step)}"]
+        if step == "plan":
+            goal = f"轮次/{self.a.round:03d}/共同输入/本轮目标.md"
+            lines += [f"  写｜{goal}：这轮要解决什么、为什么现在做、做到什么就结束（一两句）",
+                      f"  运行｜{self.run_line('plan --input 项目说明.md --input', goal)}",
+                      "  注意｜各方并发，全部封存才返回；等待时不打开任何草稿"]
+        elif step == "dispatch":
+            if light:
+                lines.append(f"  写｜{chair}/派工单.md：先按计划五节（问题｜交付物｜方法与取舍｜验收条件｜风险与检验）写计划，"
+                             f"再写派工九节：{DISPATCH_SECTIONS}")
+            else:
+                lines += [f"  读｜{self.sized([self.base / r / self.attempt / 'plan.md' for r in self.planners])}",
+                          f"  写｜{chair}/派工单.md，九节：{DISPATCH_SECTIONS}"]
+            lines += [f"  运行｜{self.run_line('dispatch', chair + '/派工单.md', '--workspace 工作目录')}",
+                      "  注意｜本机 codex 执行者要联网加 --network；远程加 --ssh 别名；用集群加预算参数"]
+        elif step in ("pilot", "formal"):
+            lines.append(f"  运行｜{self.run_line(step)}")
+            if step == "formal":
+                lines.append(f"  之后｜回执里有 JOB_ID 时 {self.run_line('watch --wait 1800')}")
+        elif step == "gate":
+            workspace = shlex.quote(str(self.state.get("workspace")))
+            lines += [f"  读｜{self.sized([own / 'pilot.md'])}；工作目录 {workspace} 的实际改动"
+                      "（代码长时交给子代理或 /code-review，只取结论）",
+                      f"  写｜{chair}/放行核对.md：通过或返工，逐条对照派工单验收条件写依据",
+                      f"  运行｜{self.run_line('gate pass', chair + '/放行核对.md', '--input-dir', workspace)}",
+                      f"  注意｜远程执行改用 --remote-input；返工用 gate revise 加同样参数，再以尝试号 {self.a.attempt + 1} init"]
+        elif step == "review":
+            pending = [job for job, state in self.state.get("job_states", {}).items() if state != "COMPLETED"]
+            lines += [f"  读｜{self.sized([own / 'formal.md'])}",
+                      *([f"  先｜作业未全部 COMPLETED（{', '.join(pending)}）：{self.run_line('watch --wait 1800')}"]
+                        if pending else []),
+                      f"  写｜{chair}/结果摘要.md：实际产物、关键数字和来源索引；大文件只放摘录和路径",
+                      f"  运行｜{self.run_line('review --input', chair + '/结果摘要.md')}",
+                      "  注意｜可再加同版材料 --input；全部封存才返回，等待时不打开任何草稿"]
+        elif step == "decide":
+            reviews = [self.base / r / self.attempt / "review.md" for r in self.reviewers]
+            lines += [f"  读｜{self.sized(reviews + [own / '执行者意见.md'])}",
+                      f"  写｜{chair}/决定稿.md：证据版本、共识与分歧、逐项采纳／暂缓／驳回及理由、待确认结论、下一步、实际用掉的计算",
+                      f"  运行｜{self.run_line('decide done|next|hold', chair + '/决定稿.md')}",
+                      "  注意｜分歧足以改变结论时先 adjudicate --input 争议点.md（routes 须有 Adjudicator）"]
+        elif step == "next":
+            lines += [f"  运行｜{self.run_line('handoff')}",
+                      f"  然后｜{self.run_line('guide', round_=self.a.round + 1, attempt=1)}"]
+        elif step == "revise":
+            lines += [f"  运行｜{self.run_line('init', attempt=self.a.attempt + 1)}",
+                      "  注意｜沿用派工单和团队，从试跑开始"]
+        if step in ("plan", "pilot", "formal", "review"):
+            lines.append("  等待｜要几分钟：放后台运行，等进程退出后看它打印的下一张卡片；等待期间不轮询、不读草稿或日志")
+        return lines
+
+    def startup_card(self):
+        first = not any(self.project.glob("轮次/*/主控/尝试-*/workflow.json"))
+        flags = (("--routes 路由.json " if first else "[--routes 路由.json] ") + "--tier standard|light "
+                 "[--planners A,B] [--worker W] [--reviewers X,Y] --title 项目名 [--limits 限制] [--max-rounds N]")
+        return ["开轮卡片",
+                *(["  写｜项目说明.md：研究问题、可共享材料、交付物与验收、完成标准、授权与限制、档位及理由、已确认的团队与路由；"
+                   "重要目标和限制写在前 15 行",
+                   '  写｜路由.json：{"名称":{"client":"claude|agy|codex","model":"…","effort":"…","label":"可选"}}，'
+                   "团队每人都要有"] if first else []),
+                "  运行｜" + self.run_line("init", flags),
+                "  注意｜init 同时初始化进度页并绑定本主控会话的用量，把它打印的页面路径告诉用户；"
+                "后续每条命令都会打印下一步卡片，不必读 scripts/ 源码或预读 references。"]
+
     @property
     def tier(self):
         return self.state.get("tier", "standard")
 
     @property
     def reviewers(self):
-        return self.state.get("reviewers", ["Claude"] if self.tier == "light" else ROLES)
+        return self.state.get("reviewers", ["Claude"] if self.tier == "light" else list(ROLES))
+
+    @property
+    def planners(self):
+        return [] if self.tier == "light" else self.state.get("planners", list(ROLES))
+
+    @property
+    def worker(self):
+        return self.state.get("worker", DEFAULT_WORKER)
 
     def next_action(self, step):
-        if self.tier == "light":
-            light_actions = {"dispatch": "主控写计划与派工单", "review": "冻结交付，交指定审阅者独立核验",
-                             "decide": "主控读取已封存审阅并裁决", "next": "新一轮由主控写计划与派工单"}
-            return light_actions.get(step, NEXT[step])
-        return NEXT[step]
+        light = self.tier == "light"
+        planners = "、".join(self.planners)
+        return {"plan": f"{len(self.planners)} 方独立规划（{planners}）",
+                "dispatch": "主控写计划与派工单" if light else "主控读取各份规划并派工",
+                "pilot": f"{self.worker} 执行派工单中的试跑", "gate": "主控核对试跑并记录放行决定",
+                "formal": f"{self.worker} 执行已放行的正式任务",
+                "review": f"冻结交付，{'、'.join(self.reviewers)} 独立书面审阅",
+                "decide": "主控读取已封存审阅并裁决",
+                "next": "新一轮由主控写计划与派工单" if light else "下一轮从独立规划开始",
+                "done": "已交付", "hold": "已暂停", "revise": "新尝试，从试跑开始"}[step]
 
     def intents(self):
         paths = [*self.chair.glob("*/intent-*.json"), *self.chair.glob("probe/*/intent-*.json")]
         for path in sorted(paths):
             role = path.stem.removeprefix("intent-")
-            if role in CALL_ROLES:
+            if re.fullmatch(AGENT_NAME, role):  # Skips intents already closed as *.ended-<ns>.json.
                 yield path, role, (path.parent / (role + ".json")).exists()
 
     def unresolved(self, role):
@@ -304,10 +449,13 @@ class Run:
     def status(self):
         require(self.state, "no workflow record for this attempt")
         print("已暂停" if self.pause_file.exists() else "当前", self.next_action(self.state["next"]), self.chair)
+        print(f"档位 {self.tier}｜规划 {'、'.join(self.planners) or '主控'}｜执行 {self.worker}｜"
+              f"审阅 {'、'.join(self.reviewers)}")
         for path, role, received in self.intents():
             print(path.parent.relative_to(self.chair), role, "已收件" if received else "待对账")
         if self.state.get("jobs"):
             print("作业", self.state.get("job_states", {}))
+        print("\n".join(self.card()))
 
     def handoff(self):
         require(self.state, "no existing workflow")
@@ -322,7 +470,8 @@ class Run:
         routes = "；".join(f"{role}={route['client']}/{route['model']}/{route['effort']}"
                          for role, route in self.state["routes"].items() if isinstance(route, dict)
                          and {"client", "model", "effort"} <= route.keys())
-        lines.extend(["## 当前交接", f"- 档位｜{self.tier}。审阅者｜{'、'.join(self.reviewers)}",
+        lines.extend(["## 当前交接", f"- 档位｜{self.tier}。规划｜{'、'.join(self.planners) or '主控'}。"
+                                    f"执行｜{self.worker}。审阅｜{'、'.join(self.reviewers)}",
                       f"- 路由｜{routes}", f"- 当前步骤｜{step}。下一步｜{self.next_action(step)}"])
         for name in ("派工", "放行意见", "决定", "返工意见"):
             path = self.chair / (name + ".md")
@@ -343,21 +492,32 @@ class Run:
                       f"- 派工状态｜{'已暂停' if self.pause_file.exists() else '未暂停'}",
                       f"- 恢复台账｜{self.path.relative_to(self.project)}",
                       "- 恢复时先核对台账和无回执意图，再按下一步推进。",
-                      "新会话输入 `/research-agent 从这个项目的恢复点继续`，先读本交接单。"])
+                      "新会话输入 `/research-agent 从这个项目的恢复点继续`，先读本交接单，"
+                      f"再运行 `{self.run_line('init')}` 把新会话补绑为主控用量来源（已有尝试只补绑定），然后按卡片推进。"])
         atomic_text(output, "\n".join(" ".join(line.splitlines()) for line in lines) + "\n")
         self.write_recovery()
         print(output)
 
     def init(self):
         a = self.a
-        lead_roots = [word for root in a.lead_root for word in ("--lead-root", root)]
-        requested_reviewers = [role.strip() for role in a.reviewers.split(",")] if a.reviewers is not None else None
+        transcript, cwd = (a.lead_transcript, None) if a.lead_transcript else own_transcript()
+        lead_roots = [word for root in [*a.lead_root, *([cwd] if cwd else [])] for word in ("--lead-root", root)]
+        lead_roots += ["--lead-transcript", transcript] if transcript else []
+        page = [word for flag, value in (("--title", a.title), ("--limits", a.limits), ("--max-rounds", a.max_rounds),
+                                         ("--cluster", a.cluster)) if value is not None for word in (flag, value)]
+        requested_reviewers = agent_names(a.reviewers, "--reviewers")
+        requested_planners = agent_names(a.planners, "--planners")
+        requested_worker = agent_names(a.worker, "--worker")
+        require(requested_worker is None or len(requested_worker) == 1, "--worker takes one agent name")
+        requested_worker = requested_worker and requested_worker[0]
         if self.state:
             require(a.tier in (None, self.tier) and (a.routes is None or load(a.routes) == self.state["routes"])
-                    and (requested_reviewers is None or sorted(requested_reviewers) == sorted(self.reviewers)),
-                    "existing attempt keeps its tier, routes and reviewers; change them in a new round")
-            if lead_roots:
-                self.board("init", *lead_roots)
+                    and (requested_reviewers is None or sorted(requested_reviewers) == sorted(self.reviewers))
+                    and (requested_planners is None or sorted(requested_planners) == sorted(self.planners))
+                    and requested_worker in (None, self.worker),
+                    "existing attempt keeps its tier, routes and team; change them in a new round")
+            if lead_roots or page:
+                self.board("init", *lead_roots, *page)
             self.status()
             return
         prior = sorted(self.project.glob("轮次/*/主控/尝试-*/workflow.json"))
@@ -382,26 +542,32 @@ class Run:
                 inherited["previous_decision"] = previous["decision"]
         old_tier = previous.get("tier", "standard")
         old_reviewers = list(previous.get("reviewers", ["Claude"] if old_tier == "light" else ROLES))
+        old_planners = list(previous.get("planners", [] if old_tier == "light" else ROLES))
+        old_worker = previous.get("worker", DEFAULT_WORKER)
         tier = a.tier or old_tier
-        if requested_reviewers is not None:
-            require(all(role in ROLES for role in requested_reviewers)
-                    and len(set(requested_reviewers)) == len(requested_reviewers),
-                    "--reviewers requires a comma-separated list of distinct Claude, Gemini or Codex roles")
+        worker = requested_worker or old_worker
         if tier == "standard":
-            require(requested_reviewers is None or set(requested_reviewers) == set(ROLES),
-                    "standard tier always uses Claude, Gemini and Codex reviewers")
-            reviewers = list(ROLES)
+            planners = requested_planners or old_planners or list(ROLES)
+            reviewers = requested_reviewers or (old_reviewers if old_tier == "standard" else list(ROLES))
+            if min(len(planners), len(reviewers)) < 2:
+                print("提示：标准档少于两方规划或审阅，失去独立对照；只在用户同意时这样配置。", file=sys.stderr)
         else:
+            require(requested_planners is None, "light tier has no planners; the chair writes the plan")
+            planners = []
             reviewers = requested_reviewers or (old_reviewers if old_tier == "light" else ["Claude"])
         routes = load(a.routes) if a.routes else previous.get("routes")
         require(routes is not None, "supply a JSON file with the confirmed routes")
         if retry:
-            require(tier == old_tier and reviewers == old_reviewers and routes == previous["routes"],
-                    "change tier, reviewers or routes in a new round")
-        validate_routes(routes, reviewers)
+            require(tier == old_tier and worker == old_worker and sorted(planners) == sorted(old_planners)
+                    and sorted(reviewers) == sorted(old_reviewers) and routes == previous["routes"],
+                    "change tier, team or routes in a new round")
+            planners, reviewers = old_planners, old_reviewers
+        team = team_members(planners, worker, reviewers)
+        require(len({role.lower() for role in team}) == len(team), "agent names must differ beyond letter case")
+        validate_routes(routes, team)
         expected = "pilot" if retry else "dispatch" if tier == "light" else "plan"
         occupied = any((self.base / role / self.attempt).is_dir() and any((self.base / role / self.attempt).iterdir())
-                       for role in (*ROLES, "主控"))
+                       for role in dict.fromkeys((*ROLES, *team, "主控")))
         require(not occupied, "existing attempt: use its original recovery ledger or choose a new round")
         board = self.project / "进度/status.json"
         if board.exists():
@@ -409,22 +575,33 @@ class Run:
             require(self.a.round >= board_state.get("round", 1), "cannot start an earlier round")
             limit = board_state.get("max_rounds")
             require(not limit or self.a.round <= limit, "round exceeds project limit")
-        self.board("init", *lead_roots)  # Before the skeleton, so a bad --lead-root leaves the attempt free.
-        tool("checkpoint.py", self.project, self.a.round, self.a.attempt, "init")
-        self.state = dict(tier=tier, reviewers=reviewers, routes=routes, jobs=[], **inherited)
+        cards = [word for role in team for word in
+                 ("--agent", f"{board_agent(role)}={role}",
+                  "--model", f"{board_agent(role)}={card_label(routes[role])}")]
+        if ADJUDICATOR in routes:  # Its card appears on its first call, already labelled.
+            cards += ["--model", f"{board_agent(ADJUDICATOR)}={card_label(routes[ADJUDICATOR])}"]
+        # Before the skeleton, so a bad --lead-root leaves the attempt free.
+        self.board("init", *lead_roots, *page, *cards, "--worker", board_agent(worker))
+        tool("checkpoint.py", self.project, self.a.round, self.a.attempt, "init",
+             "--worker", worker, "--agents", ",".join(team))
+        self.state = dict(tier=tier, planners=planners, worker=worker, reviewers=reviewers, routes=routes,
+                          jobs=[], **inherited)
+        if routes[worker]["client"] != "codex":
+            print(f"提示：执行者 {worker} 用 {routes[worker]['client']}，没有 Codex 沙箱；"
+                  "网络和工作区外写入不受 workflow.py 限制。", file=sys.stderr)
         if retry:
             atomic_text(self.chair / "派工.md", self.state["dispatch"])
         self.board("stage", a.round, {"pilot": 3, "dispatch": 2, "plan": 1}[expected], self.next_action(expected))
         self.save(expected)
 
     def record_call(self, stage, role, route, receipt, suffix=""):
-        agent = board_agent(role, route)
+        agent = board_agent(role)
         usage_args = [word for key, value in receipt["usage"].items() if value is not None
                       for word in ("--" + key.replace("_", "-"), value)]
         call_id = f"{self.a.round}/{self.a.attempt}/{stage}/{role}{suffix}"
         status = receipt.get("status", "ok")
         self.board("call", agent, stage, "--key", call_id, "--model", route["model"], "--status", status,
-                   *(["--note", f"{role} · {route['client']}"] if role not in ROLES else []),
+                   *(["--note", f"{role} · {route['client']}"] if role in (ADJUDICATOR, PROBE) else []),
                    *(["--seconds", receipt["seconds"]] if receipt["seconds"] is not None else []), *usage_args)
         self.board("agent", agent, "done" if status == "ok" else "failed", stage)
 
@@ -437,8 +614,15 @@ class Run:
             require(not self.pause_file.exists(), "dispatch paused")
             ssh = self.state.get("ssh") if worker else None
             command, stdin = client(route, prompt, worker, worker and not ssh and self.state.get("network", False))
+            if ssh:
+                remote = "cd " + shlex.quote(self.state["workspace"]) + " && exec " + shlex.join(command)
+                # The remote shell gets this as one argument, and Linux caps one argument at 128 KiB.
+                require(len(remote.encode()) < SSH_COMMAND_MAX,
+                        f"{role}: prompt too large for one SSH command ({len(remote.encode()):,} bytes); "
+                        "shorten the inputs or use a worker whose client reads the prompt from stdin")
+                command = ssh_command(ssh, None) + [remote]
             dump(intent, {"role": role, "stage": stage, "started": now(), "route": route})
-            agent = board_agent(role, route)
+            agent = board_agent(role)
             self.board("agent", agent, "running", stage)
             start = time.monotonic()
             res = None
@@ -446,13 +630,9 @@ class Run:
                 with tempfile.TemporaryDirectory() as temp:
                     cwd = temp
                     env = None
-                    if worker:
+                    if worker and not ssh:
                         cwd = self.state["workspace"]
-                        if ssh:
-                            command = ssh_command(ssh, None) + ["cd " + shlex.quote(cwd) + " && exec " + shlex.join(command)]
-                            cwd = temp
-                        else:
-                            env = codex_worker_env(cwd)
+                        env = codex_worker_env(cwd)
                     res = subprocess.run(command, input=stdin, cwd=cwd, env=env, capture_output=True, text=True)
                 elapsed = time.monotonic() - start
                 require(res.returncode == 0, f"{role} exited {res.returncode}: {res.stderr[-350:]}")
@@ -502,8 +682,8 @@ class Run:
             prompt += "\n上一轮主控决定\n" + self.state["previous_decision"]
         if stage == "review":
             prompt += "\n本轮派工与验收标准\n" + self.state["dispatch"]
-        roles = ROLES if stage == "plan" else self.reviewers
-        label = "独立规划" if stage == "plan" else "独立核验 · " + "、".join(roles)
+        roles = self.planners if stage == "plan" else self.reviewers
+        label = ("独立规划" if stage == "plan" else "独立核验") + " · " + "、".join(roles)
         self.board("stage", a.round, 1 if stage == "plan" else 4, label)
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(roles)) as pool:
             replies = {role: pool.submit(self.call, stage, role, prompt, folder) for role in roles}
@@ -580,9 +760,12 @@ class Run:
     def execute(self, stage):
         folder = self.chair / stage
         folder.mkdir(exist_ok=True)
-        result_path = folder / "Codex.json"
-        require(not self.a.receipt or not (folder / "intent-Codex.json").exists(),
+        worker = self.worker
+        result_path = folder / (worker + ".json")
+        require(not self.a.receipt or not (folder / f"intent-{worker}.json").exists(),
                 "use reconcile for an already dispatched call")
+        require(not self.a.codex_session or self.state["routes"][worker]["client"] == "codex",
+                f"--codex-session needs a Codex-client worker; {worker} uses {self.state['routes'][worker]['client']}")
         if stage == "formal":
             self.ready_jobs()
             if self.a.receipt and not result_path.exists():
@@ -594,7 +777,7 @@ class Run:
                     self.log("formal --receipt", change)
             elif not result_path.exists():  # A rerun after the call already happened keeps its receipt.
                 self.verify_gate()
-            require(not self.unresolved("Probe"), "unresolved product probe; reconcile first")
+            require(not self.unresolved(PROBE), "unresolved product probe; reconcile first")
         instruction = ("只做派工单中的试跑；若为短盘点或纯文字任务只整理获准的材料。"
                        if stage == "pilot" else "只执行已放行的正式任务。")
         prompt = instruction + "\n" + WORKER + "\n" + self.state["dispatch"]
@@ -602,7 +785,7 @@ class Run:
         if resource_plan:
             prompt += "\n已核对的资源限制\n" + json.dumps(resource_plan, ensure_ascii=False)
         if stage == "formal":
-            prompt += "\n试跑回执\n" + read(self.base / "Codex" / self.attempt / "pilot.md")
+            prompt += "\n试跑回执\n" + read(self.base / worker / self.attempt / "pilot.md")
             prompt += "\n主控放行意见\n" + self.state["gate_reason"]
             probes = [load(path)["evidence"] for path in sorted(self.chair.glob("probe/*/Probe.json"))]
             if probes:
@@ -612,13 +795,13 @@ class Run:
         self.board("stage", self.a.round, 3, stage)
         if self.a.receipt:
             text = read(self.a.receipt)
-            require(text.strip(), "empty external Codex receipt")
+            require(text.strip(), "empty external worker receipt")
             if result_path.exists():
                 require(load(result_path)["text"] == text, "receipt already exists")
             else:
                 usage = from_codex_session(self.a.codex_session, self.a.since) if self.a.codex_session else {}
                 dump(result_path, {"text": text, "usage": usage, "seconds": None})
-        report = self.call(stage, "Codex", prompt, folder, worker=True)
+        report = self.call(stage, worker, prompt, folder, worker=True)
         for line in report.splitlines():
             match = re.fullmatch(rf"JOB_ID=({JOB})\s*", line)
             if not match:
@@ -628,8 +811,8 @@ class Run:
             if match[1] not in self.state["jobs"]:
                 self.state["jobs"].append(match[1])
                 self.state.setdefault("job_states", {})[match[1]] = "UNKNOWN"
-            self.board("job", match[1], "Codex", "UNKNOWN")
-        atomic_text(self.base / "Codex" / self.attempt / (stage + ".md"), report)
+            self.board("job", match[1], worker, "UNKNOWN")
+        atomic_text(self.base / worker / self.attempt / (stage + ".md"), report)
         self.save("gate" if stage == "pilot" else "review")
 
     def ready_jobs(self):
@@ -646,7 +829,7 @@ class Run:
         if note:
             self.log("job", job_id, status, "主控确认")
         self.save(self.state["next"])
-        self.board("job", job_id, "Codex", status, *note)
+        self.board("job", job_id, self.worker, status, *note)
 
     def watch(self):
         require(self.state["jobs"], "no registered Slurm jobs")
@@ -670,7 +853,7 @@ class Run:
                     print(f"作业 {job} 为数组父作业，按 {len(found)} 行子任务汇总：{found}")
                 # Any failure first, then any waiting task; COMPLETED only when every row completed.
                 states[job] = min(found.values(), key=lambda v: (v == "COMPLETED", v in WAITING), default="UNKNOWN")
-                self.board("job", job, "Codex", states[job])
+                self.board("job", job, self.worker, states[job])
             dump(self.path, self.state)
             remaining = deadline - time.monotonic()
             # Wait while any job is unfinished; reconcile once all are final or the wait ends on an odd state.
@@ -726,9 +909,9 @@ class Run:
     def probe(self):
         a = self.a
         formal = self.chair / "formal"
-        require(not any((formal / name).exists() for name in ("intent-Codex.json", "Codex.json")),
+        require(not any((formal / name).exists() for name in (f"intent-{self.worker}.json", f"{self.worker}.json")),
                 "probe must run before any formal invocation or receipt")
-        require(not self.unresolved("Probe"), "unresolved product probe; reconcile first")
+        require(not self.unresolved(PROBE), "unresolved product probe; reconcile first")
         self.verify_gate()
         workspace = Path(self.state["workspace"])
         require(not a.outdir.is_absolute() and ".." not in a.outdir.parts, "--outdir must be relative to the workspace")
@@ -767,8 +950,8 @@ class Run:
                 command = ssh_command(ssh, None) + [shlex.join(["python3", "-c", read(runner), *target_args])]
             else:
                 command = [sys.executable, str(runner), *target_args]
-            dump(intent, {"role": "Probe", "stage": "probe", "started": now(), "spec": spec})
-            self.board("agent", "claude", "running", "probe")
+            dump(intent, {"role": PROBE, "stage": "probe", "started": now(), "spec": spec})
+            self.board("agent", board_agent(PROBE), "running", "probe")
             start = time.monotonic()
             with transcript.open("xb") as out, stderr.open("xb") as err:
                 proc = subprocess.run(command, input=request, stdout=out, stderr=err)
@@ -779,7 +962,7 @@ class Run:
             dump(receipt, {"usage": usage, "seconds": seconds, "status": status,
                            "evidence": {**spec, "status": status}})
         record = load(receipt)
-        self.record_call("probe", "Probe", route, record, "/" + tag)
+        self.record_call("probe", PROBE, route, record, "/" + tag)
         require(record["status"] == "ok", f"product probe failed; see {transcript} and {stderr}")
         print(spec["transcript"])
 
@@ -795,9 +978,9 @@ class Run:
         require(all(v in TERMINAL for v in self.state.get("job_states", {}).values()),
                 "reconcile outstanding scheduler jobs first (job ID --state for unresolvable ones)")
         formal = self.chair / "formal"
-        require(not (formal / "intent-Codex.json").exists() or (formal / "Codex.json").exists(),
+        require(not (formal / f"intent-{self.worker}.json").exists() or (formal / f"{self.worker}.json").exists(),
                 "reconcile the existing formal intent before starting another attempt")
-        require(not self.unresolved("Probe"), "unresolved product probe; reconcile first")
+        require(not self.unresolved(PROBE), "unresolved product probe; reconcile first")
         self.state["revision"] = contents(packet([self.a.file]))
         atomic_text(self.chair / "返工意见.md", self.state["revision"])
         self.save("revise")
@@ -805,7 +988,9 @@ class Run:
     def reconcile(self):
         stage = self.state["next"]
         role = self.a.role
-        if role == "Probe":
+        known = (*team_members(self.planners, self.worker, self.reviewers), ADJUDICATOR, PROBE)
+        require(role in known, f"unknown role {role}; expected one of {', '.join(known)}")
+        if role == PROBE:
             require(stage == "formal" and self.a.ended, "confirm an interrupted probe with reconcile Probe --ended")
             pending = [path for path, actor, received in self.intents() if actor == role and not received]
             require(len(pending) == 1, "expected one unresolved probe")
@@ -853,8 +1038,18 @@ def main():
     init = sub.add_parser("init")
     init.add_argument("--routes", type=Path)
     init.add_argument("--tier", choices=("light", "standard"), help="default: previous tier, or standard on first init")
-    init.add_argument("--reviewers", help="light tier: comma-separated role names (default Claude)")
+    init.add_argument("--planners", help="standard tier: comma-separated agent names from routes "
+                                         "(default: previous round, else Claude,Gemini,Codex)")
+    init.add_argument("--worker", help="agent from routes that implements and runs (default: previous round, else Codex)")
+    init.add_argument("--reviewers", help="comma-separated agent names from routes (default: previous round of the "
+                                          "same tier, else Claude for light and Claude,Gemini,Codex for standard)")
     init.add_argument("--lead-root", type=Path, action="append", default=[], help="additional lead transcript cwd root")
+    init.add_argument("--lead-transcript", type=Path, help="chair transcript (default: this Claude Code session's)")
+    init.add_argument("--title", help="progress page title")
+    init.add_argument("--limits", help="progress page limits line, e.g. '≤8 GPU · 最多 2 轮'")
+    init.add_argument("--max-rounds", type=int, help="progress page round limit")
+    init.add_argument("--cluster", help="progress page cluster card name")
+    sub.add_parser("guide", help="print the card for the next step (or for init) without changing anything")
     sub.add_parser("status")
     sub.add_parser("handoff")
     sub.add_parser("revise").add_argument("file", type=Path)
@@ -873,13 +1068,13 @@ def main():
     d.add_argument("--workspace", type=Path, required=True)
     d.add_argument("--ssh")
     d.add_argument("--scheduler-ssh", help="SSH alias where watch runs sacct (default: --ssh, else local)")
-    d.add_argument("--network", action="store_true", help="enable network access for the local Codex worker")
+    d.add_argument("--network", action="store_true", help="enable network access for a local Codex-client worker")
     d.add_argument("--mode", choices=["execute","text"], default="execute", help="text: assemble approved inputs only")
     for field in RESOURCE_FIELDS:
         d.add_argument("--"+field.replace("_","-"), type=int if field in ("nodes","cards_per_node","max_cards") else float)
     for name in ("pilot", "formal"):
         execution = sub.add_parser(name)
-        execution.add_argument("--receipt", type=Path, help="record existing Codex delivery instead of invoking the worker")
+        execution.add_argument("--receipt", type=Path, help="record an existing worker delivery instead of invoking it")
         execution.add_argument("--codex-session", help="full Codex session UUID or rollout file for the existing receipt")
         execution.add_argument("--since", help="ISO-8601 time with timezone for usage deltas in a resumed session")
     g = sub.add_parser("gate")
@@ -900,7 +1095,7 @@ def main():
     d.add_argument("result", choices=["done","next","hold"])
     d.add_argument("file", type=Path)
     d = sub.add_parser("reconcile")
-    d.add_argument("role", choices=CALL_ROLES)
+    d.add_argument("role", help="team member, Adjudicator or Probe")
     group = d.add_mutually_exclusive_group(required=True)
     group.add_argument("--ended", action="store_true")
     group.add_argument("--receipt", type=Path)
@@ -918,6 +1113,9 @@ def main():
             return
         if args.cmd == "status":
             run.status()
+            return
+        if args.cmd == "guide":
+            print("\n".join(run.card() if run.state else run.startup_card()))
             return
         with exclusive(run.lockdir):
             run.state = load(run.path) if run.path.exists() else {}

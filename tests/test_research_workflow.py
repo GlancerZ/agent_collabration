@@ -83,6 +83,8 @@ class WorkflowTest(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(bindir)+os.pathsep+os.environ["PATH"], FIXTURES=str(self.root),
                         HOME=str(self.home), PYTHONDONTWRITEBYTECODE="1")
         self.env.pop("CODEX_HOME", None)
+        for key in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CONFIG_DIR"):  # Tests must not bind the running session.
+            self.env.pop(key, None)
         self.round = self.attempt = 1
 
     def cli(self, *words, ok=True, stdin=None):
@@ -254,8 +256,8 @@ class WorkflowTest(unittest.TestCase):
                          ("light", ["Claude"], "dispatch"))
 
     def test_explicit_reviewers_and_new_round_tier_override(self):
-        self.assertIn("standard tier always", self.cli("init", "--routes", self.routes,
-                                                       "--reviewers", "Claude", ok=False))
+        self.assertIn("routes has no agent Nobody", self.cli("init", "--routes", self.routes,
+                                                             "--reviewers", "Claude,Nobody", ok=False))
         self.init_light()
         self.cli("dispatch", self.file, "--workspace", self.workspace, "--mode", "text")
         self.cli("review", "--input", self.file)
@@ -365,7 +367,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(handoff.splitlines()[3:18], lines[:15])
         for expected in ("standard", "Claude=claude/mock/high", "formal", "派工.md", "放行意见.md",
                          "封存首稿", "formal/intent-Codex.json", "42=COMPLETED", "已暂停",
-                         "/research-agent 从这个项目的恢复点继续"):
+                         "/research-agent 从这个项目的恢复点继续", f'"$PWD" {self.round} {self.attempt} init'):
             self.assertIn(expected, handoff)
         self.assertIn(str(path.relative_to(self.project)), (self.project / "恢复点.md").read_text())
         fail.unlink()
@@ -474,7 +476,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(next(self.chair.glob("probe/*/transcript.jsonl")).read_bytes(), saved)
         [call] = self.probe_calls()
         self.assertEqual([call[k] for k in ("agent", "model", "status", "input", "cache_read", "output", "seconds")],
-                         ["claude", "probe-mock", "ok", 11, 7, 3, 0.25])
+                         ["probe", "probe-mock", "ok", 11, 7, 3, 0.25])
         self.probe(request, "runs/probe-01", *options)
         self.assertEqual((len(self.calls("claude")), len(self.probe_calls())), (1, 1))
         self.assertIn("already used", self.cli("probe", "--request", request, "--outdir", "runs/probe-01",
@@ -530,6 +532,51 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(self.board()["lead_roots"], [str(lab.resolve())])
         self.assertEqual(self.board()["lead_usage"],
                          dict(requests=2, input=120, output=12, cache_read=1000, cache_write=5))
+
+    def test_init_binds_the_chairs_own_session_and_page_fields(self):
+        session = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+        transcript = self.home / ".claude/projects/-lead" / (session + ".jsonl")
+        transcript.parent.mkdir(parents=True)
+        lead_cwd = self.root / "lead cwd"
+        lead_cwd.mkdir()
+        transcript.write_text(json.dumps({"type": "assistant", "cwd": str(lead_cwd), "sessionId": session,
+                                          "message": {"id": "m1", "usage": {"input_tokens": 9, "output_tokens": 1}}})
+                              + "\n")
+        self.env["CLAUDE_CODE_SESSION_ID"] = session
+        self.cli("init", "--routes", self.routes, "--title", "置信区间", "--limits", "不用集群", "--max-rounds", 2)
+        board = self.board()
+        self.assertEqual((board["project"], board["limits"], board["max_rounds"]), ("置信区间", "不用集群", 2))
+        self.assertEqual((board["lead_transcripts"], board["lead_roots"]),
+                         ([str(transcript.resolve())], [str(lead_cwd.resolve())]))
+        self.assertEqual(board["lead_usage"]["requests"], 1)
+        self.env["CLAUDE_CODE_SESSION_ID"] = "not-a-session"
+        self.cli("init")  # An unknown session binds nothing and does not fail.
+        self.assertEqual(self.board()["lead_transcripts"], [str(transcript.resolve())])
+
+    def test_every_step_prints_a_card_with_runnable_commands(self):
+        guide = self.cli("guide")
+        self.assertIn("开轮卡片", guide)
+        self.assertIn("init --routes 路由.json", guide)
+        self.assertFalse((self.chair / "workflow.json").exists())  # guide changes nothing.
+        out = self.cli("init", "--routes", self.routes)
+        self.assertIn("下一步｜3 方独立规划（Claude、Gemini、Codex）", out)
+        self.assertIn("plan --input 项目说明.md --input 轮次/001/共同输入/本轮目标.md", out)
+        out = self.cli("plan", "--input", self.file)
+        self.assertIn("读｜轮次/001/Claude/尝试-01/plan.md（", out)
+        self.assertIn("轮次/001/Codex/尝试-01/plan.md（", out)
+        self.assertIn("主控/尝试-01/派工单.md，九节", out)
+        guide = self.cli("guide")
+        self.assertTrue(guide.startswith("下一步｜主控读取各份规划并派工"), guide)
+        self.assertIn(guide.strip(), self.cli("status"))
+        out = self.cli("dispatch", self.file, "--workspace", self.workspace)
+        line = next(l for l in out.splitlines() if l.startswith("  运行｜")).removeprefix("  运行｜")
+        self.assertIn('"$PWD" 1 1 pilot', line)
+        run = subprocess.run(["bash", "-c", line], text=True, capture_output=True, env=self.env)
+        self.assertEqual(run.returncode, 0, run.stderr)  # The card's own command line runs the pilot.
+        self.assertIn("下一步｜主控核对试跑并记录放行决定", run.stdout)
+        self.assertIn("轮次/001/Codex/尝试-01/pilot.md（", run.stdout)
+        self.assertIn("--input-dir '" + str(self.workspace.resolve()) + "'", run.stdout)
+        self.assertEqual(self.state()["next"], "gate")
 
     def test_terminal_states_array_parent_and_chair_confirmed_job(self):
         self.init_light()
@@ -721,6 +768,163 @@ class WorkflowTest(unittest.TestCase):
         recovery = (self.project / "恢复点.md").read_text()
         self.assertIn("交接单已过期", recovery)
         self.assertNotIn("先读最近生成的交接单", recovery)
+
+    def team_routes(self):
+        routes = {"Opus": dict(client="claude", model="opus-mock", effort="xhigh"),
+                  "Gemini": dict(client="agy", model="gemini-mock", effort="high"),
+                  "Sonnet": dict(client="claude", model="sonnet-mock", effort="high"),
+                  "Codex": dict(client="codex", model="codex-mock", effort="max"),
+                  "GPT": dict(client="codex", model="gpt-mock", effort="high")}
+        self.routes.write_text(json.dumps(routes))
+
+    @staticmethod
+    def model(call):
+        args = call[0]
+        return args[args.index("--model" if "--model" in args else "-m") + 1]
+
+    def test_custom_team_sizes_and_a_claude_worker(self):
+        self.team_routes()
+        out = self.cli("init", "--routes", self.routes, "--planners", "Opus,Gemini", "--worker", "Sonnet",
+                       "--reviewers", "Opus,Gemini,Codex,GPT")
+        self.assertIn("没有 Codex 沙箱", out)
+        state = self.state()
+        self.assertEqual((state["planners"], state["worker"], state["reviewers"]),
+                         (["Opus", "Gemini"], "Sonnet", ["Opus", "Gemini", "Codex", "GPT"]))
+        board = self.board()
+        self.assertEqual((board["team"], board["worker"]), (["opus", "gemini", "sonnet", "codex", "gpt"], "sonnet"))
+        self.assertEqual(board["models"]["gpt"], "gpt-mock · high")
+        self.cli("plan", "--input", self.file)
+        self.assertEqual([self.model(c) for c in self.calls("claude")], ["opus-mock"])
+        self.assertEqual(len(self.calls("agy")), 1)
+        self.assertFalse(self.calls("codex"))
+        self.assertEqual(len(list((self.chair / "封存首稿").glob("*.md"))), 2)
+        self.cli("dispatch", self.file, "--workspace", self.workspace, "--network")
+        self.cli("pilot")
+        args, prompt, context = self.calls("claude")[-1]
+        self.assertEqual(self.model(self.calls("claude")[-1]), "sonnet-mock")
+        self.assertEqual(args[args.index("--allowedTools") + 1], "Bash,Read,Edit,Write,Glob,Grep")
+        self.assertIn("acceptEdits", args)
+        self.assertNotIn("--tools", args)
+        self.assertNotIn("--no-session-persistence", args)
+        self.assertEqual(context["cwd"], str(self.workspace.resolve()))
+        self.assertTrue(all(context["env"][key] for key in CACHE_KEYS))
+        self.assertIn("≤ 1,500 字", prompt)
+        worker_dir = self.chair.parents[1] / "Sonnet/尝试-01"
+        self.assertTrue((worker_dir / "pilot.md").is_file())
+        (self.workspace / "model.py").write_text("seed = 3\n")
+        self.cli("gate", "pass", self.file, "--input-dir", self.workspace)
+        self.assertIn("Sonnet 执行已放行的正式任务", self.cli("status"))
+        self.assertIn("--codex-session needs a Codex-client worker",
+                      self.cli("formal", "--receipt", self.file, "--codex-session", SESSION, ok=False))
+        self.cli("formal")
+        self.assertIn("试跑回执\nClaude receipt", self.calls("claude")[-1][1])  # Read from the Sonnet folder.
+        self.cli("review", "--input", self.file)
+        self.assertEqual(sorted(self.model(c) for c in self.calls("codex")), ["codex-mock", "gpt-mock"])
+        self.assertEqual([self.model(c) for c in self.calls("claude")],
+                         ["opus-mock", "sonnet-mock", "sonnet-mock", "opus-mock"])
+        self.assertEqual(len(self.calls("agy")), 2)
+        self.assertEqual(len(list((self.chair / "封存首稿").glob("*.md"))), 6)
+        self.cli("handoff")
+        handoff = (self.chair / "交接单.md").read_text()
+        self.assertIn("规划｜Opus、Gemini。执行｜Sonnet。审阅｜Opus、Gemini、Codex、GPT", handoff)
+        agents = {call["agent"] for call in self.board()["calls"]}
+        self.assertEqual(agents, {"opus", "gemini", "sonnet", "codex", "gpt"})
+        self.cli("decide", "next", self.file)
+        self.round = 2
+        self.cli("init")
+        self.assertEqual((self.state()["planners"], self.state()["worker"], self.state()["reviewers"]),
+                         (["Opus", "Gemini"], "Sonnet", ["Opus", "Gemini", "Codex", "GPT"]))
+
+    def test_team_names_are_validated_before_the_attempt_starts(self):
+        self.team_routes()
+        refusals = [(("--reviewers", "Opus,opus"), "distinct agent names"),
+                    (("--reviewers", "Probe"), "reserved name Probe"),
+                    (("--worker", "Lead"), "reserved name Lead"),
+                    (("--worker", "intent-Codex"), "reserved name intent-Codex"),
+                    (("--worker", "Opus,Codex"), "one agent name"),
+                    (("--planners", "Opus,../x"), "distinct agent names"),
+                    (("--planners", "Opus,Nobody"), "routes has no agent Nobody"),
+                    (("--tier", "light", "--planners", "Opus"), "light tier has no planners"),
+                    (("--tier", "light", "--worker", "Opus"), "routes has no agent Claude")]
+        for flags, message in refusals:
+            self.assertIn(message, self.cli("init", "--routes", self.routes, *flags, ok=False))
+        self.assertFalse((self.chair / "workflow.json").exists())
+        out = self.cli("init", "--routes", self.routes, "--planners", "Opus", "--worker", "Codex",
+                       "--reviewers", "Opus,Gemini")
+        self.assertIn("失去独立对照", out)
+        self.assertIn("existing attempt keeps", self.cli("init", "--worker", "GPT", ok=False))
+        self.cli("init", "--worker", "Codex")
+        self.assertIn("unknown role Sonnet", self.cli("reconcile", "Sonnet", "--ended", ok=False))
+
+    def test_route_labels_name_the_cards_and_are_validated(self):
+        routes = {"Gemini": dict(client="agy", model="gemini-mock", effort="high", label="Gemini · 我的配置"),
+                  "Codex": dict(client="codex", model="codex-mock", effort="max"),
+                  "Adjudicator": dict(client="claude", model="fable-mock", effort="xhigh", label="裁决 Fable")}
+        team = ("--planners", "Gemini,Codex", "--worker", "Codex", "--reviewers", "Gemini,Codex")
+        for label in ("", "   ", 7, "x" * 41):
+            bad = {**routes, "Codex": {**routes["Codex"], "label": label}}
+            self.routes.write_text(json.dumps(bad))
+            self.assertIn("Codex: label must be", self.cli("init", "--routes", self.routes, *team, ok=False))
+        self.assertFalse((self.chair / "workflow.json").exists())
+        self.routes.write_text(json.dumps(routes))
+        self.cli("init", "--routes", self.routes, *team)
+        models = self.board()["models"]
+        self.assertEqual((models["gemini"], models["codex"], models["adjudicator"]),
+                         ("Gemini · 我的配置", "codex-mock · max", "裁决 Fable"))
+        self.assertNotIn("adjudicator", self.board()["team"])
+        self.cli("plan", "--input", self.file)
+        self.assertEqual(self.model(self.calls("agy")[0]), "gemini-mock")  # The label never reaches the client.
+
+    def test_a_ledger_written_before_teams_keeps_the_three_way_defaults(self):
+        self.cli("init", "--routes", self.routes)
+        ledger = self.chair / "workflow.json"
+        state = self.state()
+        for key in ("planners", "worker"):
+            del state[key]
+        ledger.write_text(json.dumps(state))
+        self.cli("plan", "--input", self.file)
+        self.assertEqual([len(self.calls(cli)) for cli in ("claude", "agy", "codex")], [1, 1, 1])
+        self.cli("dispatch", self.file, "--workspace", self.workspace)
+        self.cli("pilot")
+        self.assertTrue((self.chair.parents[1] / "Codex/尝试-01/pilot.md").is_file())
+        self.assertIn("workspace-write", self.calls("codex")[-1][0])
+
+    def test_an_old_progress_page_is_replaced_by_the_template(self):
+        self.init_light()
+        page = self.project / "进度/index.html"
+        page.write_text("<script>const AG={claude:{}}</script>")
+        self.cli("dispatch", self.file, "--workspace", self.workspace, "--mode", "text")
+        template = SCRIPT.parents[1] / "assets/progress.html"
+        self.assertEqual(page.read_bytes(), template.read_bytes())
+
+    def test_an_oversized_agy_prompt_is_refused_before_the_ssh_call(self):
+        self.team_routes()
+        self.cli("init", "--routes", self.routes, "--tier", "light", "--worker", "Gemini", "--reviewers", "Opus")
+        big = self.root / "big.md"
+        big.write_text("派工" * 40_000)
+        self.cli("dispatch", big, "--workspace", "/remote/work", "--ssh", "jupiter")
+        self.assertIn("prompt too large for one SSH command", self.cli("pilot", ok=False))
+        self.assertFalse(list(self.chair.glob("pilot/intent-*.json")))
+        self.assertFalse(self.calls("ssh"))
+
+    def test_agy_worker_gets_headless_write_permissions(self):
+        self.team_routes()
+        self.cli("init", "--routes", self.routes, "--tier", "light", "--worker", "Gemini", "--reviewers", "Opus")
+        self.cli("dispatch", self.file, "--workspace", self.workspace)
+        self.cli("pilot")
+        [(args, prompt, context)] = self.calls("agy")
+        permissions = json.loads(args[args.index("--settings") + 1])["permissions"]
+        self.assertEqual(permissions["allow"], ["command(*)", "write_file(*)", "read_file(*)"])
+        self.assertEqual(args[args.index("--mode") + 1], "accept-edits")
+        self.assertEqual(context["cwd"], str(self.workspace.resolve()))
+        self.assertIn("派工单中的试跑", prompt)
+        self.assertTrue((self.chair.parents[1] / "Gemini/尝试-01/pilot.md").is_file())
+        self.cli("gate", "revise", self.file, "--input", self.file)
+        self.attempt = 2
+        self.assertIn("change tier, team or routes", self.cli("init", "--worker", "Codex", ok=False))
+        self.cli("init")
+        self.assertEqual((self.state()["worker"], self.state()["reviewers"]), ("Gemini", ["Opus"]))
+        self.assertEqual(self.state()["next"], "pilot")
 
 
 if __name__=="__main__":
